@@ -241,6 +241,15 @@ const SEED_EVENTS = [
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
+// ── Escape key hook — call inside any modal to close on Escape ──────────────
+function useEscapeKey(onClose) {
+  useEffect(() => {
+    const h = e => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+}
+
 // ── Simple storage (localStorage only — clean, no backend needed for personal use) ──
 const store = {
   load: key => { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch { return null; } },
@@ -319,21 +328,43 @@ const formatDateInput = (year, month, day) => {
   return `${year}`;
 };
 
-// ── Tree layout: pure functions ──
+// ── Tree layout ───────────────────────────────────────────────────────────────
 function computeLayout(people, svgW = 920) {
-  const MARGIN = 72, available = svgW - MARGIN - 12;
+  const MARGIN = 60, available = svgW - MARGIN - 20;
+  const pos = {};
   const genMap = {};
   people.forEach(p => { if (!genMap[p.gen]) genMap[p.gen] = []; genMap[p.gen].push(p); });
-  Object.values(genMap).forEach(g => g.sort((a, b) => {
-    if (a.side !== b.side) { if (a.side === "paternal") return -1; if (b.side === "paternal") return 1; }
-    return (a.seq || 0) - (b.seq || 0);
-  }));
-  const pos = {};
-  Object.entries(genMap).forEach(([, group]) => {
-    const n = group.length;
-    const nw = Math.max(64, Math.min(96, available / n - 8));
-    group.forEach((p, i) => {
-      const x = n === 1 ? svgW / 2 : MARGIN + (i / (n - 1)) * (available - nw) + nw / 2;
+
+  Object.keys(genMap).map(Number).sort((a,b)=>a-b).forEach(gen => {
+    const group = genMap[gen];
+    group.sort((a, b) => {
+      // Primary: group by parent x-position — siblings with same parents stay adjacent
+      const parentX = p => {
+        const x1 = p.parentId1 && pos[p.parentId1]?.x;
+        const x2 = p.parentId2 && pos[p.parentId2]?.x;
+        return (x1 && x2) ? (x1+x2)/2 : x1||x2||Infinity;
+      };
+      const pxa = parentX(a), pxb = parentX(b);
+      if (Math.abs(pxa - pxb) > 1) return pxa - pxb;
+      // Tiebreak: paternal left, maternal right
+      const sideRank = s => s === "paternal" ? 0 : s === "maternal" ? 2 : 1;
+      return sideRank(a.side) - sideRank(b.side) || (a.seq||0) - (b.seq||0);
+    });
+    // Keep partners adjacent
+    const clumped = [], added = new Set();
+    for (const p of group) {
+      if (added.has(p.id)) continue;
+      clumped.push(p); added.add(p.id);
+      if (p.partnerId) {
+        const partner = group.find(q => q.id===p.partnerId && !added.has(q.id));
+        if (partner) { clumped.push(partner); added.add(partner.id); }
+      }
+    }
+    group.filter(p => !added.has(p.id)).forEach(p => clumped.push(p));
+    const n = clumped.length;
+    const nw = Math.max(88, Math.min(120, available / Math.max(n,1) - 8));
+    clumped.forEach((p, i) => {
+      const x = n===1 ? svgW/2 : MARGIN + (i/(n-1))*(available-nw) + nw/2;
       pos[p.id] = { x, nw };
     });
   });
@@ -356,7 +387,7 @@ export default function App() {
   const [events,       setEvents]       = useState(SEED_EVENTS);
   const [familyData,   setFamilyData]   = useState(FAMILY_DEFAULT);
   const [activeTracks, setActiveTracks] = useState(TRACK_DEFS.map(t => t.id));
-  const [view,         setView]         = useState("timeline");
+  const [view,         setView]         = useState("family");
   const [search,       setSearch]       = useState("");
   const [editing,      setEditing]      = useState(null);
   const [adding,       setAdding]       = useState(false);
@@ -365,6 +396,8 @@ export default function App() {
   const [scrollLeft,   setScrollLeft]   = useState(0);
   const [loaded,       setLoaded]       = useState(false);
   const [famLoaded,    setFamLoaded]    = useState(false);
+  const [familyEvents, setFamilyEvents] = useState([]);
+  const [famEvLoaded,  setFamEvLoaded]  = useState(false);
   const chartContainerRef = useRef(null);
 
   const currentYear = 2026, minYear = BIRTH_YEAR, maxYear = currentYear + 2;
@@ -397,6 +430,17 @@ export default function App() {
     store.save("fam-v3", familyData);
     if (claudeStore) try { claudeStore.set("fam-v3", JSON.stringify(familyData)); } catch {}
   }, [familyData, famLoaded]);
+
+  useEffect(() => {
+    (async () => {
+      try { const p = store.load("fam-events-v1"); if (Array.isArray(p)) setFamilyEvents(p); }
+      catch {} finally { setFamEvLoaded(true); }
+    })();
+  }, []);
+  useEffect(() => {
+    if (!famEvLoaded) return;
+    store.save("fam-events-v1", familyEvents);
+  }, [familyEvents, famEvLoaded]);
 
   // ── Family births & deaths track (auto-derived from familyData) ──
   const familyLineEvents = useMemo(() => {
@@ -465,6 +509,7 @@ export default function App() {
 
       {view === "family" && (
         <FamilyPage familyData={familyData} setFamilyData={setFamilyData}
+          familyEvents={familyEvents} setFamilyEvents={setFamilyEvents}
           onReset={()=>{ if(window.confirm("Reset family tree?")) setFamilyData(FAMILY_DEFAULT); }} />
       )}
 
@@ -691,28 +736,51 @@ export default function App() {
   );
 }
 
-function FamilyPage({ familyData, setFamilyData, onReset }) {
-  const [openEvent,    setOpenEvent]    = useState(null);
-  const [editPerson,   setEditPerson]   = useState(null);
-  const [addingPerson, setAddingPerson] = useState(false);
-  const [addingConnection, setAddingConnection] = useState(null); // { person, relType }
-  const [hoverP,       setHoverP]       = useState(null);
-  const [hoverH,       setHoverH]       = useState(null);
-  const [histMode,     setHistMode]     = useState("regional"); // "regional" | "pustertal"
+function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], setFamilyEvents }) {
+  const [openEvent,        setOpenEvent]        = useState(null);
+  const [editPerson,       setEditPerson]       = useState(null);
+  const [addingPerson,     setAddingPerson]     = useState(false);
+  const [addingConnection, setAddingConnection] = useState(null);
+  const [addingFamEv,      setAddingFamEv]      = useState(false);
+  const [editFamEv,        setEditFamEv]        = useState(null);
+  const [hoverP,           setHoverP]           = useState(null);
+  const [hoverH,           setHoverH]           = useState(null);
+  const [showAutoFam,      setShowAutoFam]      = useState(true);   // Auto births & deaths from tree
+  const [showST,           setShowST]           = useState(true);   // South Tyrol
+  const [showPust,         setShowPust]         = useState(false);  // Innichen/Bruneck
+  const [showFamEv,        setShowFamEv]        = useState(true);   // Custom family events
 
   const SVG_W = 920;
-  const allHistEvents = histMode === "pustertal"
-    ? [...HISTORY_EVENTS, ...PUSTERTAL_EVENTS].sort((a,b) => a.year - b.year)
-    : HISTORY_EVENTS;
 
-  // history strip year range
-  const H_Y1 = histMode === "pustertal" ? 700 : 1860;
-  const H_Y2 = 2015;
+  // Auto-derive births & deaths from the family tree data
+  const autoFamilyEvents = useMemo(() => {
+    const out = [];
+    familyData.forEach(p => {
+      if (!p.name) return;
+      const short = p.name.split(' ')[0];
+      if (p.birthYear) out.push({ id:`ab_${p.id}`, year:p.birthYear, title:`${short} born`, color:"#1D9E75", desc:`${p.name} · ${p.role}` });
+      if (p.deathYear) out.push({ id:`ad_${p.id}`, year:p.deathYear, title:`${short} †${p.deathYear}`, color:"#7B6545", desc:`${p.name} · ${p.role}` });
+    });
+    return out.sort((a,b) => a.year - b.year);
+  }, [familyData]);
+
+  // Merge visible event sources
+  const allHistEvents = useMemo(() => {
+    const evs = [];
+    if (showST)      evs.push(...HISTORY_EVENTS.map(e => ({...e})));
+    if (showPust)    evs.push(...PUSTERTAL_EVENTS.map(e => ({...e})));
+    if (showAutoFam) evs.push(...autoFamilyEvents);
+    if (showFamEv)   evs.push(...familyEvents.map(e => ({ ...e, loc:"family" })));
+    return evs.sort((a,b) => a.year - b.year);
+  }, [showST, showPust, showAutoFam, showFamEv, autoFamilyEvents, familyEvents]);
+
+  const H_Y1 = showPust ? 700 : Math.min(1860, ...allHistEvents.map(e=>e.year), 1860);
+  const H_Y2 = 2027;
   const hx = yr => 42 + (yr - H_Y1) / (H_Y2 - H_Y1) * (SVG_W - 84);
 
-  // 4-tier label placement with showLabel flag for dense events
+  // 4-tier label placement
   const histSlots = useMemo(() => {
-    const MIN = histMode === "pustertal" ? 54 : 70;
+    const MIN = showPust ? 54 : 70;
     // first pass: assign tiers greedily
     const TIERS = [0, 2, 1, 3];
     const placed = [];
@@ -724,16 +792,20 @@ function FamilyPage({ familyData, setFamilyData, onReset }) {
       return { x, tier, id: ev.id, showLabel: tier < 4 };
     });
     return slots;
-  }, [allHistEvents, histMode]);
+  }, [allHistEvents]);
 
-  // tree layout
   const NODE_H = 56;
-  const { positions, genY, svgH } = useMemo(() => {
-    const positions = computeLayout(familyData, SVG_W);
+  const { positions, genY, svgH, TREE_W } = useMemo(() => {
+    // Give every node at least 96px — grow the SVG as needed
+    const genCounts = {};
+    familyData.forEach(p => { genCounts[p.gen] = (genCounts[p.gen]||0) + 1; });
+    const maxNodes = Math.max(...Object.values(genCounts), 1);
+    const TREE_W = Math.max(SVG_W, maxNodes * 104 + 80);
+    const positions = computeLayout(familyData, TREE_W);
     const genY = computeGenY(familyData, NODE_H, 130);
     const gens = [...new Set(familyData.map(p => p.gen))].sort((a,b) => a-b);
     const svgH = 80 + gens.length * (NODE_H + 130) + 60;
-    return { positions, genY, svgH };
+    return { positions, genY, svgH, TREE_W };
   }, [familyData]);
 
   const sideCol = side => side === "paternal" ? "#D98032" : side === "maternal" ? "#3D9BE0" : "#C9A227";
@@ -771,7 +843,7 @@ function FamilyPage({ familyData, setFamilyData, onReset }) {
         const branchX = (pp1.x + pp2.x) / 2;
         const midY2 = midY + (childTop - midY) / 2;
         out.push(
-          <g key={`conn-${person.id}`} opacity="0.42">
+          <g key={`conn-${person.id}`} opacity="0.7">
             <line x1={pp1.x} y1={parentBot} x2={pp1.x} y2={midY} stroke={col} strokeWidth="1.5" />
             <line x1={pp2.x} y1={parentBot} x2={pp2.x} y2={midY} stroke={col} strokeWidth="1.5" />
             <line x1={lx}    y1={midY}      x2={rx}    y2={midY}  stroke={col} strokeWidth="1.5" />
@@ -783,7 +855,7 @@ function FamilyPage({ familyData, setFamilyData, onReset }) {
       } else {
         const px = positions[(p1||p2).id]?.x;
         if (px === undefined) return;
-        out.push(<line key={`conn-${person.id}`} x1={px} y1={parentBot} x2={cp.x} y2={childTop} stroke={col} strokeWidth="1.5" opacity="0.42" />);
+        out.push(<line key={`conn-${person.id}`} x1={px} y1={parentBot} x2={cp.x} y2={childTop} stroke={col} strokeWidth="2" opacity="0.42" />);
       }
     });
     return out;
@@ -802,7 +874,7 @@ function FamilyPage({ familyData, setFamilyData, onReset }) {
       const x1 = Math.min(pp.x, qp.x) + pp.nw/2, x2 = Math.max(pp.x, qp.x) - pp.nw/2;
       if (x2 > x1) {
         const y = (genY[person.gen] || 0) + NODE_H / 2;
-        out.push(<line key={`partner-${person.id}`} x1={x1} y1={y} x2={x2} y2={y} stroke="#ddd8cd" strokeWidth="1.5" strokeDasharray="3 2" />);
+        out.push(<line key={`partner-${person.id}`} x1={x1} y1={y} x2={x2} y2={y} stroke="#595959" strokeWidth="2" strokeDasharray="4 3" />);
       }
       drawn.add(person.id); drawn.add(person.partnerId);
     });
@@ -848,23 +920,129 @@ function FamilyPage({ familyData, setFamilyData, onReset }) {
 
   return (
     <div className="fade-in">
-      {/* ── History strip ── */}
-      <section style={{ marginBottom:24 }}>
-        <div style={{ display:"flex", alignItems:"baseline", gap:14, marginBottom:10 }}>
-          <div style={S.sectionLabel}>Historical context — South Tyrol</div>
-          <div style={{ display:"flex", gap:6, marginLeft:"auto" }}>
-            {[["regional","South Tyrol overview"],["pustertal","+ Innichen / Bruneck detail"]].map(([mode,label]) => (
-              <button key={mode} onClick={() => setHistMode(mode)}
-                style={{ ...S.histTab, ...(histMode===mode ? S.histTabActive : {}) }}>{label}</button>
-            ))}
+
+      {/* ══ FAMILY TREE ═══════════════════════════════════════════════════ */}
+      <section>
+        <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:10, flexWrap:"wrap", gap:8 }}>
+          <div style={S.sectionLabel}>Family tree</div>
+          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+            <button onClick={() => setAddingPerson(true)} style={S.addBtn}>+ Add person</button>
+            <button onClick={onReset} style={S.resetBtn}>Reset</button>
           </div>
         </div>
-        <p style={S.schoolIntro}>
-          {histMode === "pustertal"
-            ? "Pustertal / Innichen (San Candido) / Bruneck (Brunico) focus — local history back to 769. Click any event to read it."
-            : "The political and cultural history your family lived through. Switch to Pustertal focus for local Innichen / Bruneck detail."}
-        </p>
-        <div style={{ background:"#fff", border:"1px solid #ece8df", borderRadius:12, overflow:"hidden" }}>
+        <p style={S.schoolIntro}>Click any node to edit. Use &quot;+ Add person&quot; to extend the tree.</p>
+        <div style={{ background:"#fff", border:"1px solid #ece8df", borderRadius:14, overflowX:"auto" }}>
+          <svg viewBox={`0 0 ${TREE_W} ${svgH}`} style={{ width:TREE_W, height:svgH, display:"block" }}>
+            {/* generation labels */}
+            {gens.map(gen => {
+              const y = genY[gen];
+              if (y === undefined) return null;
+              return (
+                <g key={gen}>
+                  <text x={8} y={y + NODE_H/2 + 4} style={{ fontSize:9.5, fill:"#b0ab9f", fontWeight:700 }}
+                    transform={`rotate(-90,8,${y+NODE_H/2+4})`}>{genLabel(gen)}</text>
+                  <line x1={60} y1={y-8} x2={TREE_W-10} y2={y-8} stroke="#f0ede6" strokeWidth="1" />
+                </g>
+              );
+            })}
+            {/* paternal / maternal column divider */}
+            <line x1={TREE_W/2} y1={30} x2={TREE_W/2} y2={svgH-20} stroke="#ece8df" strokeWidth="1" strokeDasharray="4 4" />
+            <text x={TREE_W/4} y={22} style={{ fontSize:10, fill:"#D98032", textAnchor:"middle", fontWeight:700, opacity:0.65 }}>← Paternal (Vater)</text>
+            <text x={3*TREE_W/4} y={22} style={{ fontSize:10, fill:"#3D9BE0", textAnchor:"middle", fontWeight:700, opacity:0.65 }}>Maternal (Mutter) →</text>
+
+            {/* ── Connectors ── */}
+            {connectors}
+            {partnerLines}
+
+            {/* nodes */}
+            {familyData.map(person => {
+              const cp = positions[person.id];
+              if (!cp || genY[person.gen] === undefined) return null;
+              const { x, nw } = cp;
+              const y = genY[person.gen];
+              const col = sideCol(person.side);
+              const empty = !person.name;
+              const isSelf = person.id === "self";
+              const isHov = hoverP === person.id;
+              const nameChars = Math.max(7, Math.floor(nw / 7));
+              const nameFontSz = Math.max(8, Math.min(11, nw / 8.5));
+              const roleChars  = Math.max(6, Math.floor(nw / 6.5));
+              const roleFontSz = Math.max(7, Math.min(9, nw / 9));
+              return (
+                <g key={person.id} style={{ cursor:"pointer" }}
+                  onClick={() => setEditPerson(person)}
+                  onMouseEnter={() => setHoverP(person.id)}
+                  onMouseLeave={() => setHoverP(null)}>
+                  <rect x={x-nw/2} y={y} width={nw} height={NODE_H} rx={7}
+                    fill={empty?"#faf8f3":isSelf?"#fdf6e3":col+"1a"}
+                    stroke={isHov?col:empty?"#ddd8cd":col}
+                    strokeWidth={isHov?2:isSelf?2:1}
+                    strokeDasharray={empty?"4 2":"none"} />
+                  {empty
+                    ? <text x={x} y={y+NODE_H/2+1}
+                        style={{ fontSize:Math.max(7,Math.min(9.5,nw/9)), fill:"#c4c0b6", textAnchor:"middle", dominantBaseline:"central" }}>
+                        {person.role.length>roleChars?person.role.slice(0,roleChars-1)+"…":person.role}
+                      </text>
+                    : <>
+                        <text x={x} y={y+16} style={{ fontSize:nameFontSz, fill:isSelf?"#C9A227":col, textAnchor:"middle", fontWeight:700 }}>
+                          {person.name.length>nameChars?person.name.slice(0,nameChars-1)+"…":person.name}
+                        </text>
+                        <text x={x} y={y+29} style={{ fontSize:Math.max(7,roleFontSz-0.5), fill:"#6b6a64", textAnchor:"middle" }}>
+                          {person.birthYear||""}{person.deathYear?` – ${person.deathYear}`:person.birthYear?" –":""}
+                        </text>
+                        <text x={x} y={y+42} style={{ fontSize:roleFontSz, fill:"#a39f95", textAnchor:"middle" }}>
+                          {person.role.length>roleChars?person.role.slice(0,roleChars-1)+"…":person.role}
+                        </text>
+                      </>
+                  }
+                  {isHov && (
+                    <g>
+                      <rect x={x-110} y={y+NODE_H+4} width={220} height={person.notes?52:36} rx={6} fill="#1a1814" opacity="0.97" />
+                      <text x={x} y={y+NODE_H+16} style={{ fontSize:10, fill:"#C9A227", textAnchor:"middle", fontWeight:700 }}>
+                        {person.name || person.role}
+                      </text>
+                      {person.birthYear && <text x={x} y={y+NODE_H+27} style={{ fontSize:8.5, fill:"#aaa", textAnchor:"middle" }}>
+                        {person.birthYear}{person.deathYear?` – ${person.deathYear}`:" –"}
+                      </text>}
+                      {person.notes && <text x={x} y={y+NODE_H+40} style={{ fontSize:7.5, fill:"#888", textAnchor:"middle" }}>
+                        {person.notes.length>50?person.notes.slice(0,48)+"…":person.notes}
+                      </text>}
+                      <text x={x} y={y+NODE_H+(person.notes?50:36)} style={{ fontSize:7.5, fill:"#555", textAnchor:"middle", fontStyle:"italic" }}>
+                        click to edit
+                      </text>
+                    </g>
+                  )}
+                </g>
+              );
+            })}
+          </svg>
+        </div>
+        <p style={S.footnote}>Paternal side left (amber), maternal right (blue). Click any node to edit or add connections.</p>
+      </section>
+
+      {/* ══ HISTORICAL CONTEXT ══════════════════════════════════════════════ */}
+      <section style={{ marginTop:40, paddingTop:24, borderTop:"1px solid #ece8df" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14, flexWrap:"wrap" }}>
+          <div style={S.sectionLabel}>Historical context</div>
+          <div style={{ display:"flex", gap:6, marginLeft:"auto", flexWrap:"wrap" }}>
+            {[
+              [showST,       setShowST,       "#D98032", "🏔 South Tyrol"],
+              [showPust,     setShowPust,     "#4A9E8A", "🏘 Innichen / Bruneck"],
+              [showAutoFam,  setShowAutoFam,  "#1D9E75", "🌳 Family births & deaths"],
+              [showFamEv,    setShowFamEv,    "#C9A227", "📌 Family events"],
+            ].map(([on, set, col, label]) => (
+              <button key={label} onClick={() => set(v => !v)}
+                style={{ ...S.trackToggle, borderColor:col, background:on?col:"transparent", color:on?"#fff":"#6b6a64", opacity:on?1:0.55 }}>
+                {label}
+              </button>
+            ))}
+            {setFamilyEvents && (
+              <button onClick={() => setAddingFamEv(true)} style={S.addBtn}>+ Add family event</button>
+            )}
+          </div>
+        </div>
+        {allHistEvents.length > 0 ? (
+          <div style={{ background:"#fff", border:"1px solid #ece8df", borderRadius:12, overflow:"hidden" }}>
           <svg viewBox={`0 0 ${SVG_W} 160`} style={{ width:"100%", height:"auto" }}>
             {/* year grid */}
             {[...Array(Math.floor((H_Y2-H_Y1)/50)+1)].map((_,i) => {
@@ -934,21 +1112,20 @@ function FamilyPage({ familyData, setFamilyData, onReset }) {
             })}
           </svg>
         </div>
+        ) : (
+          <p style={{ fontSize:13, color:"#a39f95", textAlign:"center", padding:"20px 0" }}>Enable a category above to see events.</p>
+        )}
 
-        {/* scrollable event index for dense sections */}
+        {/* scrollable event index */}
         <div style={{ marginTop:8, display:"flex", flexWrap:"wrap", gap:6 }}>
           {allHistEvents.map(ev => {
             const isOpen = openEvent === ev.id;
             return (
-              <button key={ev.id}
-                onClick={() => setOpenEvent(isOpen ? null : ev.id)}
+              <button key={ev.id} onClick={() => setOpenEvent(isOpen ? null : ev.id)}
                 style={{
-                  border:`1.5px solid ${isOpen ? ev.color : "#e8e3d8"}`,
-                  borderRadius:20, padding:"3px 10px", cursor:"pointer",
-                  fontFamily:"inherit", fontSize:11, fontWeight:isOpen?700:400,
-                  background: isOpen ? ev.color+"18" : "transparent",
-                  color: isOpen ? ev.color : "#6b6a64",
-                  whiteSpace:"nowrap",
+                  fontSize:11, border:"none", background:"transparent", cursor:"pointer",
+                  color: isOpen ? ev.color : "#6b6a64", fontWeight: isOpen ? 700 : 400,
+                  padding:"2px 4px", whiteSpace:"nowrap",
                 }}>
                 <span style={{ fontWeight:700, marginRight:4 }}>{ev.year}</span>{ev.title}
               </button>
@@ -956,7 +1133,7 @@ function FamilyPage({ familyData, setFamilyData, onReset }) {
           })}
         </div>
         {openEvent && (() => {
-          const ev = [...HISTORY_EVENTS,...PUSTERTAL_EVENTS].find(e => e.id===openEvent);
+          const ev = allHistEvents.find(e => e.id === openEvent);
           return ev ? (
             <div style={{ ...S.stageDetail, borderColor:ev.color, marginTop:10 }}>
               <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:8 }}>
@@ -967,112 +1144,6 @@ function FamilyPage({ familyData, setFamilyData, onReset }) {
             </div>
           ) : null;
         })()}
-      </section>
-
-      {/* ── Family tree ── */}
-      <section>
-        <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:10, flexWrap:"wrap", gap:8 }}>
-          <div style={S.sectionLabel}>Family tree</div>
-          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-            <button onClick={() => setAddingPerson(true)} style={S.addBtn}>+ Add person</button>
-            <button onClick={onReset} style={S.resetBtn}>Reset</button>
-          </div>
-        </div>
-        <p style={S.schoolIntro}>
-          Click any node to edit. Use "+ Add person" to extend the tree.
-        </p>
-        <div style={{ background:"#fff", border:"1px solid #ece8df", borderRadius:14, overflow:"hidden" }}>
-          <svg viewBox={`0 0 ${SVG_W} ${svgH}`} style={{ width:"100%", height:"auto" }}>
-            {/* generation labels + horizontal divider at gen4 */}
-            {gens.map(gen => {
-              const y = genY[gen];
-              if (y === undefined) return null;
-              return (
-                <g key={gen}>
-                  <text x={8} y={y + NODE_H/2 + 4} style={{ fontSize:9.5, fill:"#b0ab9f", fontWeight:700 }}
-                    transform={`rotate(-90,8,${y+NODE_H/2+4})`}>{genLabel(gen)}</text>
-                  <line x1={60} y1={y-8} x2={SVG_W-10} y2={y-8} stroke="#f0ede6" strokeWidth="1" />
-                </g>
-              );
-            })}
-            {/* paternal / maternal column divider */}
-            <line x1={SVG_W/2} y1={30} x2={SVG_W/2} y2={svgH-20} stroke="#ece8df" strokeWidth="1" strokeDasharray="4 4" />
-            <text x={SVG_W/4} y={22} style={{ fontSize:10, fill:"#D98032", textAnchor:"middle", fontWeight:700, opacity:0.65 }}>← Paternal (Vater)</text>
-            <text x={3*SVG_W/4} y={22} style={{ fontSize:10, fill:"#3D9BE0", textAnchor:"middle", fontWeight:700, opacity:0.65 }}>Maternal (Mutter) →</text>
-            {/* connectors */}
-            {connectors}
-            {/* partner lines */}
-            {partnerLines}
-            {/* nodes */}
-            {familyData.map(person => {
-              const cp = positions[person.id];
-              if (!cp || genY[person.gen] === undefined) return null;
-              const { x, nw } = cp;
-              const y = genY[person.gen];
-              const col = sideCol(person.side);
-              const empty = !person.name;
-              const isSelf = person.id === "self";
-              const isHov = hoverP === person.id;
-              // scale font/truncation to available node width
-              const nameChars = Math.max(7, Math.floor(nw / 7));
-              const nameFontSz = Math.max(8, Math.min(11, nw / 8.5));
-              const roleChars  = Math.max(6, Math.floor(nw / 6.5));
-              const roleFontSz = Math.max(7, Math.min(9, nw / 9));
-              return (
-                <g key={person.id} style={{ cursor:"pointer" }}
-                  onClick={() => setEditPerson(person)}
-                  onMouseEnter={() => setHoverP(person.id)}
-                  onMouseLeave={() => setHoverP(null)}>
-                  <rect x={x-nw/2} y={y} width={nw} height={NODE_H} rx={7}
-                    fill={empty?"#faf8f3":isSelf?"#fdf6e3":col+"1a"}
-                    stroke={isHov?col:empty?"#ddd8cd":col}
-                    strokeWidth={isHov?2:isSelf?2:1}
-                    strokeDasharray={empty?"4 2":"none"} />
-                  {empty
-                    ? <text x={x} y={y+NODE_H/2+1}
-                        style={{ fontSize:Math.max(7,Math.min(9.5,nw/9)), fill:"#c4c0b6", textAnchor:"middle", dominantBaseline:"central" }}>
-                        {person.role.length>roleChars?person.role.slice(0,roleChars-1)+"…":person.role}
-                      </text>
-                    : <>
-                        <text x={x} y={y+16} style={{ fontSize:nameFontSz, fill:isSelf?"#C9A227":col, textAnchor:"middle", fontWeight:700 }}>
-                          {person.name.length>nameChars?person.name.slice(0,nameChars-1)+"…":person.name}
-                        </text>
-                        <text x={x} y={y+29} style={{ fontSize:Math.max(7,roleFontSz-0.5), fill:"#6b6a64", textAnchor:"middle" }}>
-                          {person.birthYear||""}{person.deathYear?` – ${person.deathYear}`:person.birthYear?" –":""}
-                        </text>
-                        <text x={x} y={y+42} style={{ fontSize:roleFontSz, fill:"#a39f95", textAnchor:"middle" }}>
-                          {person.role.length>roleChars?person.role.slice(0,roleChars-1)+"…":person.role}
-                        </text>
-                      </>
-                  }
-                  {/* hover tooltip with full details */}
-                  {isHov && (
-                    <g>
-                      <rect x={x-110} y={y+NODE_H+4} width={220} height={person.notes?52:36} rx={6} fill="#1a1814" opacity="0.97" />
-                      <text x={x} y={y+NODE_H+16} style={{ fontSize:10, fill:"#C9A227", textAnchor:"middle", fontWeight:700 }}>
-                        {person.name || person.role}
-                      </text>
-                      {person.birthYear && <text x={x} y={y+NODE_H+27} style={{ fontSize:8.5, fill:"#aaa", textAnchor:"middle" }}>
-                        {person.birthYear}{person.deathYear?` – ${person.deathYear}`:" –"}
-                      </text>}
-                      {person.notes && <text x={x} y={y+NODE_H+40} style={{ fontSize:7.5, fill:"#888", textAnchor:"middle" }}>
-                        {person.notes.length>50?person.notes.slice(0,48)+"…":person.notes}
-                      </text>}
-                      <text x={x} y={y+NODE_H+(person.notes?50:36)} style={{ fontSize:7.5, fill:"#555", textAnchor:"middle", fontStyle:"italic" }}>
-                        click to edit
-                      </text>
-                    </g>
-                  )}
-                </g>
-              );
-            })}
-          </svg>
-        </div>
-        <p style={S.footnote}>
-          Paternal side left (amber), maternal side right (blue). Dashed lines = couples.
-          Bracket connectors show parent→child. Click any node to edit; use + Add person to extend.
-          All saves automatically.
-        </p>
       </section>
 
       {editPerson && (
@@ -1095,306 +1166,68 @@ function FamilyPage({ familyData, setFamilyData, onReset }) {
           onClose={() => { setAddingPerson(false); setAddingConnection(null); }}
         />
       )}
+      {(addingFamEv || editFamEv) && (
+        <AddFamilyEventModal
+          event={editFamEv}
+          onSave={ev => {
+            if (editFamEv) setFamilyEvents(p => p.map(e => e.id===ev.id ? ev : e));
+            else setFamilyEvents(p => [...p, { ...ev, id: uid() }]);
+            setAddingFamEv(false); setEditFamEv(null);
+          }}
+          onDelete={editFamEv ? () => { setFamilyEvents(p => p.filter(e => e.id!==editFamEv.id)); setEditFamEv(null); } : null}
+          onClose={() => { setAddingFamEv(false); setEditFamEv(null); }}
+        />
+      )}
     </div>
   );
 }
 
-// ════════════════════════════════════════════════════════════════
-// PERSON MODAL (edit / delete)
-// ════════════════════════════════════════════════════════════════
-// ════════════════════════════════════════════════════════════════
-// DATA EDITOR — raw JSON view and edit of all app data
-// ════════════════════════════════════════════════════════════════
-
-function PersonModal({ person, people, onSave, onDelete, onClose, onAddConnection }) {
-  const [name,      setName]      = useState(person.name       ?? "");
-  const [birthYear, setBirthYear] = useState(person.birthYear  ?? "");
-  const [deathYear, setDeathYear] = useState(person.deathYear  ?? "");
-  const [notes,     setNotes]     = useState(person.notes      ?? "");
-  const [role,      setRole]      = useState(person.role       ?? "");
-  const [gen,       setGen]       = useState(person.gen        ?? 4);
-  const [parentId1, setParentId1] = useState(person.parentId1  ?? "");
-  const [parentId2, setParentId2] = useState(person.parentId2  ?? "");
-  const GEN_LABELS = {
-    0: "Gen 0 — Great-great-grandparents",
-    1: "Gen 1 — Great-grandparents",
-    2: "Gen 2 — Grandparents & siblings",
-    3: "Gen 3 — Parents, aunts & uncles",
-    4: "Gen 4 — Your generation",
-    5: "Gen 5 — Children & nephews",
-  };
-  // People who could plausibly be a parent (in a row above this person)
-  const parentOptions = people
-    ? people.filter(p => p.id !== person.id && p.gen < gen && p.name).sort((a,b) => b.gen - a.gen)
-    : [];
+// ── Add / Edit Family Event Modal ────────────────────────────────────────────
+function AddFamilyEventModal({ event, onSave, onDelete, onClose }) {
+  const [year,  setYear]  = useState(event?.year  ?? 1990);
+  const [title, setTitle] = useState(event?.title ?? "");
+  const [desc,  setDesc]  = useState(event?.desc  ?? "");
+  const [color, setColor] = useState(event?.color ?? "#C9A227");
+  useEscapeKey(onClose);
+  const COLORS = ["#C9A227","#E15554","#D98032","#1D9E75","#3D9BE0","#7B4FB0","#D4537E","#4A9E8A"];
   return (
     <div style={S.overlay} onClick={onClose}>
       <div style={S.modal} onClick={e => e.stopPropagation()}>
-        <h3 style={S.modalTitle}>{person.name || person.role || "Person"}</h3>
-        <label style={S.field}><span style={S.fieldLabel}>Name</span>
-          <input style={S.input} value={name} onChange={e => setName(e.target.value)} autoFocus /></label>
+        <h3 style={S.modalTitle}>{event ? "Edit family event" : "Add family event"}</h3>
         <div style={S.row}>
-          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Born</span>
-            <input style={S.input} type="number" min={1800} max={2024} value={birthYear} placeholder="e.g. 1932"
-              onChange={e => setBirthYear(e.target.value ? parseInt(e.target.value) : "")} /></label>
-          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Died (if applicable)</span>
-            <input style={S.input} type="number" min={1800} max={2026} value={deathYear} placeholder="optional"
-              onChange={e => setDeathYear(e.target.value ? parseInt(e.target.value) : "")} /></label>
+          <label style={{ ...S.field, flex:"0 0 100px" }}>
+            <span style={S.fieldLabel}>Year</span>
+            <input style={S.input} type="number" min={1800} max={2030} value={year}
+              onChange={e => setYear(parseInt(e.target.value)||1990)} />
+          </label>
+          <label style={{ ...S.field, flex:1 }}>
+            <span style={S.fieldLabel}>Title</span>
+            <input style={S.input} value={title} onChange={e => setTitle(e.target.value)}
+              placeholder="e.g. Ernst builds the Terlan house" autoFocus />
+          </label>
         </div>
-        <label style={S.field}><span style={S.fieldLabel}>Role / description</span>
-          <input style={S.input} value={role} onChange={e => setRole(e.target.value)} placeholder="e.g. Farmer, Terlan" /></label>
-        <label style={S.field}><span style={S.fieldLabel}>Generation row (move if placed incorrectly)</span>
-          <select style={S.input} value={gen} onChange={e => setGen(parseInt(e.target.value))}>
-            {Object.entries(GEN_LABELS).map(([g, label]) => (
-              <option key={g} value={g}>{label}</option>
-            ))}
-          </select>
+        <label style={S.field}>
+          <span style={S.fieldLabel}>Description (optional)</span>
+          <textarea style={{ ...S.input, minHeight:60, resize:"vertical" }} value={desc}
+            onChange={e => setDesc(e.target.value)} placeholder="What happened, why it matters…" />
         </label>
-        {parentOptions.length > 0 && (
-          <div style={S.row}>
-            <label style={{ ...S.field, flex:1 }}>
-              <span style={S.fieldLabel}>Parent 1</span>
-              <select style={S.input} value={parentId1||""} onChange={e => setParentId1(e.target.value||null)}>
-                <option value="">— none —</option>
-                {parentOptions.map(p => <option key={p.id} value={p.id}>{p.name} ({p.role})</option>)}
-              </select>
-            </label>
-            <label style={{ ...S.field, flex:1 }}>
-              <span style={S.fieldLabel}>Parent 2</span>
-              <select style={S.input} value={parentId2||""} onChange={e => setParentId2(e.target.value||null)}>
-                <option value="">— none —</option>
-                {parentOptions.map(p => <option key={p.id} value={p.id}>{p.name} ({p.role})</option>)}
-              </select>
-            </label>
-          </div>
-        )}
-        <label style={S.field}><span style={S.fieldLabel}>Notes — occupation, hometown, anything known</span>
-          <textarea style={{ ...S.input, minHeight:70, resize:"vertical" }} value={notes}
-            onChange={e => setNotes(e.target.value)}
-            placeholder="e.g. Never spoke Italian at home. Survived the Options by staying." /></label>
-        <div style={S.modalActions}>
-          {onDelete && <button style={S.deleteBtn} onClick={() => { if (window.confirm("Remove this person from the tree?")) onDelete(person.id); }}>Remove</button>}
-          <div style={{ flex:1 }} />
-          <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
-          <button style={S.saveBtn} onClick={() => onSave({ ...person, name:name.trim(), birthYear:birthYear||null, deathYear:deathYear||null, notes:notes.trim(), role:role.trim()||person.role, gen, parentId1:parentId1||null, parentId2:parentId2||null })}>Save</button>
-        </div>
-
-        {/* ── Add a connection ── */}
-        <div style={{ borderTop:"1.5px solid #ece8df", marginTop:20, paddingTop:16 }}>
-          <div style={{ fontSize:11, fontWeight:700, color:"#a39f95", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:10 }}>
-            Add a family connection to {name||person.role}
-          </div>
-          <div style={{ display:"flex", flexWrap:"wrap", gap:7 }}>
-            {[
-              ["child",               "＋ Child"],
-              ["parent",              "＋ Parent"],
-              ["sibling",             "＋ Sibling"],
-              ["partner",             "＋ Partner"],
-              ["grandparent",         "＋ Grandparent"],
-              ["auntuncle",           "＋ Aunt / Uncle"],
-              ["cousin",              "＋ Cousin"],
-              ["greatgrandparent",    "＋ Great-grandparent"],
-            ].map(([type, label]) => (
-              <button key={type} onClick={() => onAddConnection(type)}
-                style={S.connectBtn}>{label}</button>
+        <label style={S.field}>
+          <span style={S.fieldLabel}>Colour</span>
+          <div style={{ display:"flex", gap:8, marginTop:4 }}>
+            {COLORS.map(c => (
+              <div key={c} onClick={() => setColor(c)} style={{
+                width:22, height:22, borderRadius:"50%", background:c, cursor:"pointer",
+                border: color===c ? "3px solid #1a1a1a" : "2px solid transparent",
+              }} />
             ))}
           </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ════════════════════════════════════════════════════════════════
-// ADD PERSON MODAL
-// ════════════════════════════════════════════════════════════════
-function AddPersonModal({ people, prefilledRelType, prefilledRef, onAdd, onClose }) {
-  const [relType,   setRelType]   = useState(prefilledRelType || "parent");
-  const [refId,     setRefId]     = useState(prefilledRef?.id || people[0]?.id || "");
-  const [name,      setName]      = useState("");
-  const [birthYear, setBirthYear] = useState("");
-  const [deathYear, setDeathYear] = useState("");
-  const [notes,     setNotes]     = useState("");
-  const [role,      setRole]      = useState("");
-
-  const ref = prefilledRef || people.find(p => p.id === refId);
-  const isPrefilled = !!(prefilledRelType && prefilledRef);
-  const genMap = { parent:-1, sibling:0, partner:0, grandparent:-2, greatgrandparent:-3, greatgreatgrandparent:-4, auntuncle:-1, cousin:0, child:1 };
-  const genOffset = genMap[relType] ?? 0;
-  const computedGen = ref ? ref.gen + genOffset : 4;
-  const genLabel = { 0:"Great-great-grandparents", 1:"Great-grandparents", 2:"Grandparents", 3:"Parents", 4:"You / siblings", 5:"Children / nephews" };
-  const roleDefault = { parent:"Parent", sibling:"Sibling", partner:"Partner", grandparent:"Grandparent", greatgrandparent:"Great-grandparent", greatgreatgrandparent:"Great-great-grandparent", auntuncle:"Aunt / Uncle", cousin:"Cousin", child:"Child" };
-  const relLabel = { parent:"parent", sibling:"sibling", partner:"partner", grandparent:"grandparent", greatgrandparent:"great-grandparent", greatgreatgrandparent:"great-great-grandparent", auntuncle:"aunt/uncle", cousin:"cousin", child:"child" };
-
-  return (
-    <div style={S.overlay} onClick={onClose}>
-      <div style={{ ...S.modal, maxWidth:480 }} onClick={e => e.stopPropagation()}>
-        <h3 style={S.modalTitle}>
-          {isPrefilled
-            ? `Add ${relLabel[relType]} of ${prefilledRef.name || prefilledRef.role}`
-            : "Add a family member"}
-        </h3>
-
-        {/* Only show relationship / reference dropdowns when not called from a person card */}
-        {!isPrefilled && (
-          <div style={S.row}>
-            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Relationship</span>
-              <select style={S.input} value={relType} onChange={e => setRelType(e.target.value)}>
-                <option value="parent">Parent of…</option>
-                <option value="sibling">Sibling of…</option>
-                <option value="partner">Partner of…</option>
-                <option value="grandparent">Grandparent of…</option>
-                <option value="greatgrandparent">Great-grandparent of…</option>
-                <option value="greatgreatgrandparent">Great-great-grandparent of…</option>
-                <option value="auntuncle">Aunt / Uncle of…</option>
-                <option value="cousin">Cousin of…</option>
-                <option value="child">Child of…</option>
-              </select>
-            </label>
-            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>…this person</span>
-              <select style={S.input} value={refId} onChange={e => setRefId(e.target.value)}>
-                {people.map(p => <option key={p.id} value={p.id}>{p.name || `[${p.role}]`}</option>)}
-              </select>
-            </label>
-          </div>
-        )}
-
-        {ref && (
-          <div style={S.durationPill}>
-            <span style={{ color:"#1D9E75", fontWeight:700 }}>{genLabel[computedGen] || `Generation ${computedGen}`}</span>
-            <span style={{ color:"#a39f95" }}> · {relLabel[relType]} of {ref.name || ref.role}</span>
-          </div>
-        )}
-        <label style={S.field}><span style={S.fieldLabel}>Name</span>
-          <input style={S.input} value={name} onChange={e => setName(e.target.value)} placeholder="First and/or family name" autoFocus /></label>
-        <div style={S.row}>
-          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Born</span>
-            <input style={S.input} type="number" min={1800} max={2024} value={birthYear} placeholder="e.g. 1932"
-              onChange={e => setBirthYear(e.target.value ? parseInt(e.target.value) : "")} /></label>
-          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Died</span>
-            <input style={S.input} type="number" min={1800} max={2026} value={deathYear} placeholder="optional"
-              onChange={e => setDeathYear(e.target.value ? parseInt(e.target.value) : "")} /></label>
-        </div>
-        <label style={S.field}><span style={S.fieldLabel}>Role / description</span>
-          <input style={S.input} value={role} onChange={e => setRole(e.target.value)} placeholder={roleDefault[relType]} /></label>
-        <label style={S.field}><span style={S.fieldLabel}>Notes</span>
-          <textarea style={{ ...S.input, minHeight:60, resize:"vertical" }} value={notes}
-            onChange={e => setNotes(e.target.value)} placeholder="Occupation, hometown, anything known…" /></label>
+        </label>
         <div style={S.modalActions}>
+          {onDelete && <button style={S.deleteBtn} onClick={onDelete}>Delete</button>}
           <div style={{ flex:1 }} />
           <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
-          <button style={S.saveBtn}
-            onClick={() => onAdd({ name:name.trim(), birthYear:birthYear||null, deathYear:deathYear||null, notes:notes.trim(), role:role.trim()||roleDefault[relType] }, relType, refId)}>
-            Add to tree
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-
-function EventModal({ event, tracks, minYear, maxYear, birthYear, onSave, onDelete, onClose }) {
-  const [startStr, setStartStr] = useState(() => formatDateInput(event?.year, event?.month, event?.day));
-  const [endStr,   setEndStr]   = useState(() => formatDateInput(event?.endYear, event?.endMonth, event?.endDay));
-  const [track,    setTrack]    = useState(event?.track ?? "self");
-  const [title,    setTitle]    = useState(event?.title ?? "");
-  const [note,     setNote]     = useState(event?.note  ?? "");
-
-  const sp = parseDate(startStr);   // null (empty) | false (invalid) | {year,month,day}
-  const ep = parseDate(endStr);
-
-  const startOk  = sp !== false;
-  const endOk    = ep !== false;
-  const hasStart = sp && sp !== false;
-
-  const isRange = hasStart && ep && ep !== false &&
-    dateToFY(ep.year, ep.month, ep.day) > dateToFY(sp.year, sp.month, sp.day);
-
-  const startAge = hasStart ? ageAt(sp.year, sp.month, sp.day, birthYear) : null;
-  const endAge   = (isRange && ep) ? ageAt(ep.year, ep.month, ep.day, birthYear) : null;
-  const durYrs   = isRange
-    ? (dateToFY(ep.year,ep.month,ep.day) - dateToFY(sp.year,sp.month,sp.day)).toFixed(1)
-    : null;
-
-  const preview = (parsed) => parsed && parsed !== false
-    ? `${formatDate(parsed.year, parsed.month, parsed.day)} · age ${ageAt(parsed.year, parsed.month, parsed.day, birthYear)}`
-    : null;
-
-  const fieldBorder = (str, ok) =>
-    str && !ok ? "#E15554" : str && ok ? "#1D9E75" : undefined;
-
-  const canSave = title.trim() && hasStart && startOk && endOk;
-
-  return (
-    <div style={S.overlay} onClick={onClose}>
-      <div style={S.modal} onClick={e => e.stopPropagation()}>
-        <h3 style={S.modalTitle}>{event ? "Edit moment" : "Add a moment"}</h3>
-
-        <label style={S.field}>
-          <span style={S.fieldLabel}>Title</span>
-          <input style={S.input} value={title} onChange={e => setTitle(e.target.value)}
-            placeholder="e.g. Born in Innichen" autoFocus />
-        </label>
-
-        {/* Start date */}
-        <label style={S.field}>
-          <span style={S.fieldLabel}>
-            Start date{preview(sp) ? <span style={{ color:"#1D9E75", fontWeight:600 }}> — {preview(sp)}</span> : null}
-          </span>
-          <input style={{ ...S.input, borderColor: fieldBorder(startStr, startOk) }}
-            value={startStr} onChange={e => setStartStr(e.target.value)}
-            placeholder="YYYY  ·  MM/YYYY  ·  DD/MM/YYYY" />
-          {startStr && !startOk && <div style={S.dateError}>Try: 1990 · 05/1990 · 25/05/1990</div>}
-        </label>
-
-        {/* End date */}
-        <label style={S.field}>
-          <span style={S.fieldLabel}>
-            End date
-            {preview(ep)
-              ? <span style={{ color:"#1D9E75", fontWeight:600 }}> — {preview(ep)}</span>
-              : <span style={{ color:"#b0ab9f" }}> (optional — leave blank for a point event)</span>}
-          </span>
-          <input style={{ ...S.input, borderColor: fieldBorder(endStr, endOk) }}
-            value={endStr} onChange={e => setEndStr(e.target.value)}
-            placeholder="YYYY  ·  MM/YYYY  ·  DD/MM/YYYY" />
-          {endStr && !endOk && <div style={S.dateError}>Try: 2015 · 09/2015 · 30/09/2015</div>}
-        </label>
-
-        {isRange && (
-          <div style={S.durationPill}>
-            <span style={{ color:"#1D9E75", fontWeight:700 }}>{durYrs} yrs</span>
-            <span style={{ color:"#a39f95" }}> · ages {startAge}–{endAge} · shows as bar on timeline</span>
-          </div>
-        )}
-
-        <label style={S.field}>
-          <span style={S.fieldLabel}>Track</span>
-          <select style={S.input} value={track} onChange={e => setTrack(e.target.value)}>
-            {tracks.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
-          </select>
-        </label>
-
-        <label style={S.field}>
-          <span style={S.fieldLabel}>Note (optional)</span>
-          <textarea style={{ ...S.input, minHeight:60, resize:"vertical" }} value={note}
-            onChange={e => setNote(e.target.value)} placeholder="What this meant, how it felt…" />
-        </label>
-
-        <div style={S.modalActions}>
-          {onDelete && <button style={S.deleteBtn} onClick={() => onDelete(event.id)}>Delete</button>}
-          <div style={{ flex:1 }} />
-          <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
-          <button style={S.saveBtn} disabled={!canSave}
-            onClick={() => onSave({
-              ...(event||{}),
-              year: sp.year,  month: sp.month  || null, day: sp.day  || null,
-              endYear:  isRange ? ep.year        : null,
-              endMonth: isRange ? ep.month||null : null,
-              endDay:   isRange ? ep.day  ||null : null,
-              track, title: title.trim(), note: note.trim(),
-            })}>
+          <button style={S.saveBtn} disabled={!title.trim()}
+            onClick={() => onSave({ ...(event||{}), year, title:title.trim(), desc:desc.trim(), color, loc:"family" })}>
             Save
           </button>
         </div>
@@ -1403,83 +1236,56 @@ function EventModal({ event, tracks, minYear, maxYear, birthYear, onSave, onDele
   );
 }
 
-
-
 const FONT = `"Georgia","Iowan Old Style",serif`;
 const SANS = `"Helvetica Neue","Segoe UI",system-ui,sans-serif`;
 const CSS = `
-  * { box-sizing:border-box; }
-  .stage-chip { transition:transform .15s,background .2s; }
-  .stage-chip:hover { transform:translateY(-1px); }
-  .tab:hover { color:#2b2b28; }
-  .fade-in { animation:fadeIn .3s ease; }
-  @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:none} }
-  input:focus,select:focus,textarea:focus { outline:2px solid #C9A227;outline-offset:1px; }
+  @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,600;1,400&display=swap');
+  * { box-sizing: border-box; }
+  body { font-family: ${SANS}; background: #faf8f3; color: #2b2b28; }
+  .fade-in { animation: fadeIn .35s ease; }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
 `;
 const S = {
-  page:          { fontFamily:SANS, color:"#2b2b28", background:"#faf8f3", padding:"28px 22px 48px", maxWidth:980, margin:"0 auto", lineHeight:1.5 },
-  header:        { marginBottom:24 },
-  h1:            { fontFamily:FONT, fontSize:30, fontWeight:600, margin:"0 0 8px", letterSpacing:"-0.01em" },
-  sub:           { fontSize:14, color:"#6b6a64", maxWidth:640, margin:0 },
-  tabs:          { display:"flex", gap:4, marginTop:18, borderBottom:"1.5px solid #ece8df" },
-  searchBar:     { display:"flex", alignItems:"center", gap:8, background:"#fff", border:"1px solid #ece8df", borderRadius:10, padding:"6px 12px", marginBottom:12 },
-  searchInput:   { flex:1, border:"none", background:"transparent", fontSize:14, fontFamily:"inherit", outline:"none", color:"#2b2b28" },
-  searchClear:   { border:"none", background:"transparent", cursor:"pointer", fontSize:18, color:"#b0ab9f", lineHeight:1 },
-  tab:           { border:"none", background:"transparent", fontFamily:SANS, fontSize:15, fontWeight:600, color:"#a39f95", padding:"8px 16px", cursor:"pointer", borderBottom:"2.5px solid transparent", marginBottom:-1.5, transition:"color .2s" },
-  tabActive:     { color:"#2b2b28", borderBottom:"2.5px solid #C9A227" },
-  histTab:       { border:"1.5px solid #ddd8cd", background:"transparent", borderRadius:20, padding:"4px 12px", cursor:"pointer", fontFamily:SANS, fontSize:12, fontWeight:600, color:"#a39f95" },
-  histTabActive: { background:"#2b2b28", color:"#fff", borderColor:"#2b2b28" },
-  sectionLabel:  { fontSize:11, textTransform:"uppercase", letterSpacing:"0.08em", color:"#a39f95", marginBottom:10, fontWeight:600 },
-  schoolIntro:   { fontSize:14, color:"#6b6a64", maxWidth:720, margin:"0 0 14px" },
-  stagesWrap:    { marginBottom:26 },
-  stagesStrip:   { display:"flex", flexWrap:"wrap", gap:8 },
-  stageChip:     { display:"flex", flexDirection:"column", alignItems:"flex-start", border:"1.5px solid", borderRadius:8, padding:"7px 12px", cursor:"pointer", fontFamily:SANS, minWidth:92 },
-  stageAge:      { fontSize:10, opacity:0.7, fontWeight:600 },
-  stageName:     { fontSize:13, fontWeight:600 },
-  stageDetail:   { marginTop:14, border:"1.5px solid", borderRadius:12, padding:"16px 18px", background:"#fff" },
-  stageDetailHead:{ display:"flex", alignItems:"center", gap:10, flexWrap:"wrap", marginBottom:12 },
-  stageDot:      { width:12, height:12, borderRadius:"50%", flexShrink:0 },
-  stageTitle:    { fontFamily:FONT, fontSize:18 },
-  stageCrisis:   { fontSize:13, color:"#6b6a64", fontStyle:"italic" },
-  virtue:        { fontSize:13, fontWeight:700 },
-  stageGrid:     { display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:16 },
-  stageLabel:    { fontSize:11, textTransform:"uppercase", letterSpacing:"0.06em", color:"#a39f95", marginBottom:4, fontWeight:700 },
-  stageText:     { fontSize:13, margin:0, color:"#3a3a36" },
-  schoolWrap:    { marginBottom:26 },
-  topicList:     { display:"flex", flexDirection:"column", gap:8 },
-  topicCard:     { border:"1.5px solid", borderRadius:12, overflow:"hidden", background:"#fff" },
-  topicHead:     { width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between", padding:"13px 18px", background:"transparent", border:"none", cursor:"pointer", fontFamily:SANS, textAlign:"left" },
-  topicTitle:    { fontFamily:FONT, fontSize:16, color:"#2b2b28" },
-  topicChevron:  { fontSize:22, transition:"transform .2s", lineHeight:1 },
-  topicBody:     { padding:"0 18px 18px" },
-  topicSummary:  { fontSize:13.5, color:"#3a3a36", margin:"0 0 12px", lineHeight:1.6 },
-  topicPoints:   { margin:0, paddingLeft:18 },
-  topicPoint:    { fontSize:13, color:"#4a4a45", marginBottom:8, lineHeight:1.55 },
+  page:          { maxWidth:1400, margin:"0 auto", padding:"0 24px 80px" },
+  header:        { display:"flex", alignItems:"center", gap:16, padding:"28px 0 20px", borderBottom:"2px solid #2b2b28", marginBottom:28, flexWrap:"wrap" },
+  h1:            { fontFamily:FONT, fontSize:28, fontWeight:600, letterSpacing:"-.02em", margin:0 },
+  sub:           { fontSize:13, color:"#a39f95", marginTop:4 },
+  tabs:          { display:"flex", gap:4, marginLeft:"auto" },
+  tab:           { border:"1.5px solid #ddd8cd", background:"transparent", borderRadius:8, padding:"6px 18px", cursor:"pointer", fontSize:13, fontWeight:600, fontFamily:SANS, color:"#6b6a64" },
+  tabActive:     { background:"#2b2b28", borderColor:"#2b2b28", color:"#fff" },
   controls:      { marginBottom:18 },
-  zoomBar:       { display:"flex", alignItems:"center", gap:6, marginBottom:10, flexWrap:"wrap", padding:"8px 12px", background:"#fff", border:"1px solid #ece8df", borderRadius:10 },
-  zoomLabel:     { fontSize:11, fontWeight:700, color:"#a39f95", textTransform:"uppercase", letterSpacing:"0.07em", marginRight:4 },
-  zoomBtn:       { width:28, height:28, border:"1.5px solid #ddd8cd", background:"transparent", borderRadius:6, cursor:"pointer", fontSize:16, fontWeight:700, fontFamily:"inherit", color:"#2b2b28", display:"flex", alignItems:"center", justifyContent:"center" },
-  zoomPreset:    { border:"1.5px solid #ddd8cd", background:"transparent", borderRadius:6, padding:"3px 8px", cursor:"pointer", fontSize:12, fontWeight:600, fontFamily:"inherit", color:"#6b6a64" },
-  zoomPresetActive:{ background:"#C9A227", borderColor:"#C9A227", color:"#fff" },
-  trackToggles:  { display:"flex", flexWrap:"wrap", gap:8, alignItems:"center" },
-  trackToggle:   { display:"flex", alignItems:"center", gap:7, border:"1.5px solid", borderRadius:20, padding:"6px 14px", cursor:"pointer", fontFamily:SANS, fontSize:13, fontWeight:600 },
-  trackDot:      { width:8, height:8, borderRadius:"50%" },
+  trackToggles:  { display:"flex", flexWrap:"wrap", gap:6, marginBottom:14 },
+  trackToggle:   { border:"1.5px solid", borderRadius:20, padding:"5px 13px", cursor:"pointer", fontSize:12, fontWeight:600, fontFamily:SANS, display:"flex", alignItems:"center", gap:5 },
+  trackDot:      { width:8, height:8, borderRadius:"50%", display:"inline-block" },
   addBtn:        { border:"1.5px dashed #2b2b28", background:"transparent", borderRadius:20, padding:"6px 14px", cursor:"pointer", fontSize:13, fontWeight:600, fontFamily:SANS },
   connectBtn:    { border:"1.5px solid #ddd8cd", background:"#faf8f3", borderRadius:20, padding:"5px 14px", cursor:"pointer", fontSize:13, fontWeight:600, fontFamily:SANS, color:"#2b2b28" },
-  resetBtn:      { border:"none", background:"transparent", color:"#a39f95", cursor:"pointer", fontSize:12, textDecoration:"underline", fontFamily:SANS },
-  chartWrap:     { background:"#fff", borderRadius:14, padding:"12px 8px", border:"1px solid #ece8df", overflow:"hidden" },
-  footnote:      { fontSize:12, color:"#a39f95", marginTop:16, fontStyle:"italic", maxWidth:720 },
+  resetBtn:      { border:"1.5px solid #ddd8cd", background:"transparent", borderRadius:20, padding:"6px 14px", cursor:"pointer", fontSize:12, fontFamily:SANS, color:"#a39f95" },
+  zoomBar:       { display:"flex", alignItems:"center", gap:6, marginBottom:10, flexWrap:"wrap", padding:"8px 12px", background:"#fff", border:"1px solid #ece8df", borderRadius:10 },
+  zoomLabel:     { fontSize:11, fontWeight:700, color:"#a39f95", textTransform:"uppercase", letterSpacing:"0.07em", marginRight:4 },
+  zoomBtn:       { width:28, height:28, border:"1.5px solid #ddd8cd", background:"transparent", borderRadius:6, cursor:"pointer", fontSize:16, fontWeight:700, fontFamily:SANS, color:"#2b2b28" },
+  zoomPreset:    { border:"1.5px solid #ddd8cd", background:"transparent", borderRadius:6, padding:"3px 8px", cursor:"pointer", fontSize:12, fontWeight:600, fontFamily:SANS, color:"#6b6a64" },
+  zoomPresetActive:{ background:"#C9A227", borderColor:"#C9A227", color:"#fff" },
+  chartWrap:     { borderRadius:12, overflow:"hidden", border:"1px solid #ece8df" },
+  searchBar:     { display:"flex", alignItems:"center", gap:8, background:"#fff", border:"1px solid #ece8df", borderRadius:10, padding:"7px 12px", marginBottom:12 },
+  searchInput:   { flex:1, border:"none", background:"transparent", fontSize:14, fontFamily:SANS, outline:"none", color:"#2b2b28" },
+  searchClear:   { border:"none", background:"transparent", cursor:"pointer", fontSize:20, color:"#b0ab9f", lineHeight:1 },
+  footnote:      { fontSize:11, color:"#b0ab9f", marginTop:10, textAlign:"center" },
+  sectionLabel:  { fontFamily:FONT, fontSize:13, fontWeight:600, color:"#a39f95", textTransform:"uppercase", letterSpacing:"0.1em", marginBottom:10 },
+  schoolIntro:   { fontSize:13, color:"#a39f95", marginBottom:14 },
+  stageDetail:   { background:"#fff", border:"1.5px solid #ece8df", borderRadius:10, padding:"14px 18px", lineHeight:1.6 },
+  stageDot:      { width:10, height:10, borderRadius:"50%", display:"inline-block", flexShrink:0 },
+  stageTitle:    { fontSize:15, color:"#2b2b28", fontFamily:FONT },
   overlay:       { position:"fixed", inset:0, background:"rgba(20,18,14,0.4)", display:"flex", alignItems:"center", justifyContent:"center", padding:20, zIndex:1000 },
-  modal:         { background:"#fff", borderRadius:16, padding:"24px 26px", width:"100%", maxWidth:460, boxShadow:"0 20px 60px rgba(0,0,0,0.25)", maxHeight:"90vh", overflowY:"auto" },
-  modalTitle:    { fontFamily:FONT, fontSize:20, margin:"0 0 16px" },
-  field:         { display:"block", marginBottom:14 },
-  fieldLabel:    { display:"block", fontSize:12, color:"#6b6a64", marginBottom:5, fontWeight:600 },
-  input:         { width:"100%", border:"1.5px solid #ddd8cd", borderRadius:8, padding:"9px 11px", fontSize:14, fontFamily:SANS, background:"#fdfcf9" },
+  modal:         { background:"#fff", borderRadius:16, padding:"28px 28px 22px", width:"100%", maxWidth:520, maxHeight:"90vh", overflowY:"auto", boxShadow:"0 8px 40px rgba(0,0,0,.18)" },
+  modalTitle:    { fontFamily:FONT, fontSize:20, fontWeight:600, marginBottom:22, color:"#2b2b28" },
+  field:         { display:"flex", flexDirection:"column", gap:6, marginBottom:16 },
+  fieldLabel:    { fontSize:12, fontWeight:600, color:"#a39f95", textTransform:"uppercase", letterSpacing:"0.06em" },
+  input:         { border:"1.5px solid #ddd8cd", borderRadius:8, padding:"9px 12px", fontSize:14, fontFamily:SANS, color:"#2b2b28", outline:"none", background:"#faf8f3", width:"100%" },
   row:           { display:"flex", gap:12 },
-  modalActions:  { display:"flex", alignItems:"center", gap:8, marginTop:8 },
   durationPill:  { display:"flex", alignItems:"center", gap:4, background:"#f0faf6", border:"1px solid #9FE1CB", borderRadius:8, padding:"7px 12px", fontSize:12, marginBottom:14, flexWrap:"wrap" },
   dateError:     { fontSize:11, color:"#E15554", marginTop:4 },
-  deleteBtn:     { border:"1.5px solid #E15554", color:"#E15554", background:"transparent", borderRadius:8, padding:"8px 14px", cursor:"pointer", fontSize:13, fontWeight:600, fontFamily:SANS },
-  cancelBtn:     { border:"1.5px solid #ddd8cd", background:"transparent", borderRadius:8, padding:"8px 16px", cursor:"pointer", fontSize:13, fontFamily:SANS },
-  saveBtn:       { border:"none", background:"#C9A227", color:"#fff", borderRadius:8, padding:"8px 20px", cursor:"pointer", fontSize:13, fontWeight:700, fontFamily:SANS },
+  modalActions:  { display:"flex", gap:10, marginTop:22, paddingTop:16, borderTop:"1px solid #ece8df", alignItems:"center" },
+  saveBtn:       { background:"#2b2b28", color:"#fff", border:"none", borderRadius:8, padding:"9px 22px", cursor:"pointer", fontSize:14, fontWeight:600, fontFamily:SANS },
+  cancelBtn:     { background:"transparent", color:"#6b6a64", border:"1.5px solid #ddd8cd", borderRadius:8, padding:"9px 18px", cursor:"pointer", fontSize:14, fontFamily:SANS },
+  deleteBtn:     { background:"transparent", color:"#E15554", border:"1.5px solid #E15554", borderRadius:8, padding:"9px 16px", cursor:"pointer", fontSize:13, fontFamily:SANS },
 };
