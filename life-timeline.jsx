@@ -388,6 +388,8 @@ export default function App() {
   const [familyData,   setFamilyData]   = useState(FAMILY_DEFAULT);
   const [activeTracks, setActiveTracks] = useState(TRACK_DEFS.map(t => t.id));
   const [view,         setView]         = useState("family");
+  const [tlUnlocked,   setTlUnlocked]   = useState(() => { try { return sessionStorage.getItem("tl_ok") === "1"; } catch { return false; } });
+  const [showPwModal,  setShowPwModal]  = useState(false);
   const [search,       setSearch]       = useState("");
   const [editing,      setEditing]      = useState(null);
   const [adding,       setAdding]       = useState(false);
@@ -501,9 +503,12 @@ export default function App() {
         <h1 style={S.h1}>Timeline</h1>
         <span style={{ fontSize:11, color:"#c4c0b6", marginLeft:8, alignSelf:"flex-end", paddingBottom:4 }}>v4 · Jun 2026</span>
         <div style={S.tabs}>
-          {[["timeline","Timeline"],["family","Family"]].map(([id,label])=>(
-            <button key={id} onClick={()=>setView(id)} style={{...S.tab,...(view===id?S.tabActive:{})}}>{label}</button>
-          ))}
+          <button onClick={() => setView("family")}
+            style={{...S.tab,...(view==="family"?S.tabActive:{})}}>Family</button>
+          <button onClick={() => { if (tlUnlocked) setView("timeline"); else setShowPwModal(true); }}
+            style={{...S.tab,...(view==="timeline"?S.tabActive:{}), opacity: tlUnlocked?1:0.7}}>
+            {tlUnlocked ? "Timeline" : "🔒 Timeline"}
+          </button>
         </div>
       </header>
 
@@ -731,6 +736,15 @@ export default function App() {
         <EventModal event={editing} tracks={TRACK_DEFS.filter(t=>!t.derived)} minYear={minYear} maxYear={maxYear} birthYear={BIRTH_YEAR}
           onSave={saveEvent} onDelete={editing?deleteEvent:null}
           onClose={()=>{setEditing(null);setAdding(false);}}/>
+      )}
+      {showPwModal && (
+        <PasswordModal
+          onSuccess={() => {
+            try { sessionStorage.setItem("tl_ok","1"); } catch {}
+            setTlUnlocked(true); setShowPwModal(false); setView("timeline");
+          }}
+          onClose={() => setShowPwModal(false)}
+        />
       )}
     </div>
   );
@@ -1230,6 +1244,40 @@ function AddFamilyEventModal({ event, onSave, onDelete, onClose }) {
             onClick={() => onSave({ ...(event||{}), year, title:title.trim(), desc:desc.trim(), color, loc:"family" })}>
             Save
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Password modal ───────────────────────────────────────────────────────────
+function PasswordModal({ onSuccess, onClose }) {
+  const [pw,  setPw]  = useState("");
+  const [err, setErr] = useState(false);
+  useEscapeKey(onClose);
+  const attempt = () => {
+    if (pw === "PYT") { onSuccess(); }
+    else { setErr(true); setPw(""); setTimeout(() => setErr(false), 1400); }
+  };
+  return (
+    <div style={S.overlay} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth:340, textAlign:"center" }} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize:32, marginBottom:12 }}>🔒</div>
+        <h3 style={{ ...S.modalTitle, marginBottom:8, textAlign:"center" }}>Personal timeline</h3>
+        <p style={{ fontSize:13, color:"#a39f95", marginBottom:20 }}>Enter the password to access your personal timeline.</p>
+        <input
+          style={{ ...S.input, textAlign:"center", letterSpacing:"0.2em", fontSize:18,
+            borderColor: err ? "#E15554" : undefined,
+            transition:"border-color .2s" }}
+          type="password" value={pw} autoFocus
+          placeholder="••••"
+          onChange={e => setPw(e.target.value.toUpperCase())}
+          onKeyDown={e => e.key === "Enter" && attempt()}
+        />
+        {err && <p style={{ fontSize:12, color:"#E15554", marginTop:8 }}>Incorrect password</p>}
+        <div style={{ ...S.modalActions, justifyContent:"center", borderTop:"none", marginTop:20 }}>
+          <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
+          <button style={S.saveBtn} onClick={attempt}>Unlock</button>
         </div>
       </div>
     </div>
