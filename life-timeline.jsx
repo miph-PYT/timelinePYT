@@ -1056,11 +1056,15 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
       if (x2 > x1) {
         const y  = (genY[person.gen] || 0) + NODE_H / 2;
         const mx = (x1 + x2) / 2;
+        const ptype  = person.partnerType || "verheiratet";
+        const psym   = { verheiratet:"⚭", partner:"♥", verlobt:"◇", geschieden:"⚮", getrennt:"╌" }[ptype] || "⚭";
+        const pcolor = { verheiratet:"#595959", partner:"#D4537E", verlobt:"#7B4FB0", geschieden:"#a39f95", getrennt:"#a39f95" }[ptype] || "#595959";
+        const pdash  = ptype === "geschieden" ? "3 3" : ptype === "getrennt" ? "2 5" : "4 3";
         out.push(
           <g key={`partner-${person.id}`}>
-            <line x1={x1} y1={y} x2={mx-11} y2={y} stroke="#595959" strokeWidth="2" strokeDasharray="4 3" />
-            <text x={mx} y={y+5} textAnchor="middle" style={{ fontSize:14, fill:"#595959", fontFamily:"serif", userSelect:"none" }}>⚭</text>
-            <line x1={mx+11} y1={y} x2={x2} y2={y} stroke="#595959" strokeWidth="2" strokeDasharray="4 3" />
+            <line x1={x1} y1={y} x2={mx-11} y2={y} stroke={pcolor} strokeWidth="2" strokeDasharray={pdash} />
+            <text x={mx} y={y+5} textAnchor="middle" style={{ fontSize:14, fill:pcolor, fontFamily:"serif", userSelect:"none" }}>{psym}</text>
+            <line x1={mx+11} y1={y} x2={x2} y2={y} stroke={pcolor} strokeWidth="2" strokeDasharray={pdash} />
           </g>
         );
       }
@@ -1190,13 +1194,18 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
                         {person.role.length>roleChars?person.role.slice(0,roleChars-1)+"…":person.role}
                       </text>
                     : <>
-                        <text x={x} y={y+16} style={{ fontSize:nameFontSz, fill:isSelf?"#C9A227":col, textAnchor:"middle", fontWeight:700 }}>
+                        <text x={x} y={y+15} style={{ fontSize:nameFontSz, fill:isSelf?"#C9A227":col, textAnchor:"middle", fontWeight:700 }}>
                           {person.name.length>nameChars?person.name.slice(0,nameChars-1)+"…":person.name}
                         </text>
-                        <text x={x} y={y+29} style={{ fontSize:Math.max(7,roleFontSz-0.5), fill:"#6b6a64", textAnchor:"middle" }}>
+                        {person.surname && (
+                          <text x={x} y={y+26} style={{ fontSize:Math.max(7, nameFontSz-1.5), fill:isSelf?"#C9A227":col, textAnchor:"middle", fontWeight:900, letterSpacing:"0.04em" }}>
+                            {person.surname.length>nameChars?person.surname.slice(0,nameChars-1)+"…":person.surname.toUpperCase()}
+                          </text>
+                        )}
+                        <text x={x} y={person.surname ? y+37 : y+28} style={{ fontSize:Math.max(7,roleFontSz-0.5), fill:"#6b6a64", textAnchor:"middle" }}>
                           {person.birthYear||""}{person.deathYear?` – ${person.deathYear}`:person.birthYear?" –":""}
                         </text>
-                        <text x={x} y={y+42} style={{ fontSize:roleFontSz, fill:"#a39f95", textAnchor:"middle" }}>
+                        <text x={x} y={person.surname ? y+48 : y+40} style={{ fontSize:roleFontSz, fill:"#a39f95", textAnchor:"middle" }}>
                           {person.role.length>roleChars?person.role.slice(0,roleChars-1)+"…":person.role}
                         </text>
                       </>
@@ -1205,7 +1214,7 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
                     <g>
                       <rect x={x-110} y={y+NODE_H+4} width={220} height={person.notes?52:36} rx={6} fill="#1a1814" opacity="0.97" />
                       <text x={x} y={y+NODE_H+16} style={{ fontSize:10, fill:"#C9A227", textAnchor:"middle", fontWeight:700 }}>
-                        {person.name || person.role}
+                        {[person.name, person.surname].filter(Boolean).join(" ") || person.role}
                       </text>
                       {person.birthYear && <text x={x} y={y+NODE_H+27} style={{ fontSize:8.5, fill:"#aaa", textAnchor:"middle" }}>
                         {person.birthYear}{person.deathYear?` – ${person.deathYear}`:" –"}
@@ -1390,19 +1399,28 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
 
 // ── PersonModal ──────────────────────────────────────────────────────────────
 function PersonModal({ person, people, onSave, onDelete, onClose, onAddConnection }) {
-  const [name,      setName]      = useState(person.name      ?? "");
-  const [birthYear, setBirthYear] = useState(person.birthYear ?? "");
-  const [deathYear, setDeathYear] = useState(person.deathYear ?? "");
-  const [notes,     setNotes]     = useState(person.notes     ?? "");
-  const [role,      setRole]      = useState(person.role      ?? "");
-  const [gen,       setGen]       = useState(person.gen       ?? 4);
-  const [parentId1, setParentId1] = useState(person.parentId1 ?? "");
-  const [parentId2, setParentId2] = useState(person.parentId2 ?? "");
+  const [name,        setName]        = useState(person.name        ?? "");
+  const [surname,     setSurname]     = useState(person.surname     ?? "");
+  const [birthYear,   setBirthYear]   = useState(person.birthYear   ?? "");
+  const [deathYear,   setDeathYear]   = useState(person.deathYear   ?? "");
+  const [notes,       setNotes]       = useState(person.notes       ?? "");
+  const [role,        setRole]        = useState(person.role        ?? "");
+  const [gen,         setGen]         = useState(person.gen         ?? 4);
+  const [parentId1,   setParentId1]   = useState(person.parentId1   ?? "");
+  const [parentId2,   setParentId2]   = useState(person.parentId2   ?? "");
+  const [partnerType, setPartnerType] = useState(person.partnerType ?? "verheiratet");
   const GEN_LABELS = {
     0:"Gen 0 — Ururgroßeltern", 1:"Gen 1 — Urgroßeltern",
     2:"Gen 2 — Großeltern & Geschwister",  3:"Gen 3 — Eltern, Tanten & Onkel",
     4:"Gen 4 — Deine Generation",          5:"Gen 5 — Kinder & Neffen",
   };
+  const PARTNER_TYPES = [
+    ["verheiratet", "⚭ Verheiratet"],
+    ["partner",     "♥ Partner/in"],
+    ["verlobt",     "◇ Verlobt"],
+    ["geschieden",  "⚮ Geschieden"],
+    ["getrennt",    "╌ Getrennt"],
+  ];
   const parentOptions = people
     ? people.filter(p => p.id !== person.id && p.gen < gen && p.name).sort((a,b) => b.gen - a.gen)
     : [];
@@ -1411,11 +1429,17 @@ function PersonModal({ person, people, onSave, onDelete, onClose, onAddConnectio
     <div style={S.overlay} onClick={onClose}>
       <div style={S.modal} onClick={e => e.stopPropagation()}>
         <h3 style={S.modalTitle}>{person.name || person.role || "Person"}</h3>
-        <label style={S.field}><span style={S.fieldLabel}>Name</span>
-          <input style={S.input} value={name} onChange={e => setName(e.target.value)} autoFocus /></label>
+        <div style={S.row}>
+          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Vorname</span>
+            <input style={S.input} value={name} onChange={e => setName(e.target.value)} autoFocus
+              placeholder="z.B. Ernst" /></label>
+          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Nachname</span>
+            <input style={S.input} value={surname} onChange={e => setSurname(e.target.value)}
+              placeholder="z.B. Mitterhofer" /></label>
+        </div>
         <div style={S.row}>
           <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Geboren</span>
-            <input style={S.input} type="number" min={1800} max={2024} value={birthYear} placeholder="e.g. 1932"
+            <input style={S.input} type="number" min={1800} max={2024} value={birthYear} placeholder="z.B. 1932"
               onChange={e => setBirthYear(e.target.value ? parseInt(e.target.value) : "")} /></label>
           <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Gestorben (falls zutreffend)</span>
             <input style={S.input} type="number" min={1800} max={2026} value={deathYear} placeholder="optional"
@@ -1423,6 +1447,12 @@ function PersonModal({ person, people, onSave, onDelete, onClose, onAddConnectio
         </div>
         <label style={S.field}><span style={S.fieldLabel}>Rolle / Beschreibung</span>
           <input style={S.input} value={role} onChange={e => setRole(e.target.value)} placeholder="z.B. Bauer, Terlan" /></label>
+        {person.partnerId && (
+          <label style={S.field}><span style={S.fieldLabel}>Beziehungstyp</span>
+            <select style={S.input} value={partnerType} onChange={e => setPartnerType(e.target.value)}>
+              {PARTNER_TYPES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select></label>
+        )}
         <label style={S.field}><span style={S.fieldLabel}>Generationsreihe (verschieben falls falsch)</span>
           <select style={S.input} value={gen} onChange={e => setGen(parseInt(e.target.value))}>
             {Object.entries(GEN_LABELS).map(([g, label]) => <option key={g} value={g}>{label}</option>)}
@@ -1431,13 +1461,13 @@ function PersonModal({ person, people, onSave, onDelete, onClose, onAddConnectio
           <div style={S.row}>
             <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Elternteil 1</span>
               <select style={S.input} value={parentId1||""} onChange={e => setParentId1(e.target.value||null)}>
-                <option value="">— none —</option>
-                {parentOptions.map(p => <option key={p.id} value={p.id}>{p.name} ({p.role})</option>)}
+                <option value="">— keine —</option>
+                {parentOptions.map(p => <option key={p.id} value={p.id}>{p.name}{p.surname ? ' '+p.surname : ''} ({p.role})</option>)}
               </select></label>
             <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Elternteil 2</span>
               <select style={S.input} value={parentId2||""} onChange={e => setParentId2(e.target.value||null)}>
-                <option value="">— none —</option>
-                {parentOptions.map(p => <option key={p.id} value={p.id}>{p.name} ({p.role})</option>)}
+                <option value="">— keine —</option>
+                {parentOptions.map(p => <option key={p.id} value={p.id}>{p.name}{p.surname ? ' '+p.surname : ''} ({p.role})</option>)}
               </select></label>
           </div>
         )}
@@ -1448,7 +1478,7 @@ function PersonModal({ person, people, onSave, onDelete, onClose, onAddConnectio
           {onDelete && <button style={S.deleteBtn} onClick={() => { if (window.confirm("Diese Person entfernen?")) onDelete(person.id); }}>Entfernen</button>}
           <div style={{ flex:1 }} />
           <button style={S.cancelBtn} onClick={onClose}>Abbrechen</button>
-          <button style={S.saveBtn} onClick={() => onSave({ ...person, name:name.trim(), birthYear:birthYear||null, deathYear:deathYear||null, notes:notes.trim(), role:role.trim()||person.role, gen, parentId1:parentId1||null, parentId2:parentId2||null })}>Speichern</button>
+          <button style={S.saveBtn} onClick={() => onSave({ ...person, name:name.trim(), surname:surname.trim()||null, birthYear:birthYear||null, deathYear:deathYear||null, notes:notes.trim(), role:role.trim()||person.role, gen, parentId1:parentId1||null, parentId2:parentId2||null, partnerType })}>Speichern</button>
         </div>
         <div style={{ borderTop:"1.5px solid #ece8df", marginTop:20, paddingTop:16 }}>
           <div style={{ fontSize:11, fontWeight:700, color:"#a39f95", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:10 }}>
@@ -1472,6 +1502,7 @@ function AddPersonModal({ people, prefilledRelType, prefilledRef, onAdd, onClose
   const [relType, setRelType] = useState(prefilledRelType || "parent");
   const [refId,   setRefId]   = useState(prefilledRef?.id || people[0]?.id || "");
   const [name,    setName]    = useState("");
+  const [surname, setSurname] = useState("");
   const [birthYear,setBirthYear]=useState("");
   const [deathYear,setDeathYear]=useState("");
   const [notes,   setNotes]   = useState("");
@@ -1508,9 +1539,14 @@ function AddPersonModal({ people, prefilledRelType, prefilledRef, onAdd, onClose
             <span style={{ color:"#a39f95" }}> · {relLabel[relType]} of {ref.name || ref.role}</span>
           </div>
         )}
-        <label style={S.field}><span style={S.fieldLabel}>Name</span>
-          <input style={S.input} value={name} onChange={e => setName(e.target.value)}
-            placeholder="Vor- und/oder Nachname" autoFocus /></label>
+        <div style={S.row}>
+          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Vorname</span>
+            <input style={S.input} value={name} onChange={e => setName(e.target.value)}
+              placeholder="z.B. Anna" autoFocus /></label>
+          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Nachname</span>
+            <input style={S.input} value={surname} onChange={e => setSurname(e.target.value)}
+              placeholder="z.B. Mitterhofer" /></label>
+        </div>
         <div style={S.row}>
           <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Geboren</span>
             <input style={S.input} type="number" min={1800} max={2030} value={birthYear} placeholder="optional"
@@ -1526,7 +1562,7 @@ function AddPersonModal({ people, prefilledRelType, prefilledRef, onAdd, onClose
           <div style={{ flex:1 }} />
           <button style={S.cancelBtn} onClick={onClose}>Abbrechen</button>
           <button style={S.saveBtn}
-            onClick={() => { onAdd({ name:name.trim(), birthYear:birthYear||null, deathYear:deathYear||null, notes:notes.trim(), role:roleDefault[relType] }, relType, refId); onClose(); }}>
+            onClick={() => { onAdd({ name:name.trim(), surname:surname.trim()||null, birthYear:birthYear||null, deathYear:deathYear||null, notes:notes.trim(), role:roleDefault[relType] }, relType, refId); onClose(); }}>
             Add person
           </button>
         </div>
