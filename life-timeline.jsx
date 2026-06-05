@@ -250,13 +250,55 @@ function useEscapeKey(onClose) {
   }, [onClose]);
 }
 
-// ── Simple storage (localStorage only — clean, no backend needed for personal use) ──
+// ── Storage: localStorage (always) + GitHub Gist (when configured) ────────────
 const store = {
   load: key => { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch { return null; } },
   save: (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} },
 };
-// Claude artifact fallback (when running inside Claude.ai)
 const claudeStore = typeof window !== "undefined" && window.storage ? window.storage : null;
+
+// Gist credentials live in localStorage so they survive page reloads
+const gistCreds = {
+  getToken:  () => { try { return localStorage.getItem("gist_token")  || ""; } catch { return ""; } },
+  getGistId: () => { try { return localStorage.getItem("gist_id")     || ""; } catch { return ""; } },
+  save: (token, id) => { try { localStorage.setItem("gist_token", token); localStorage.setItem("gist_id", id); } catch {} },
+  clear: () => { try { localStorage.removeItem("gist_token"); localStorage.removeItem("gist_id"); } catch {} },
+};
+
+const GIST_FILE = "timeline-data.json";
+
+async function gistLoad(token, id) {
+  const r = await fetch(`https://api.github.com/gists/${id}`,
+    { headers: { Authorization: `token ${token}` } });
+  if (!r.ok) throw new Error(`${r.status}`);
+  const data = await r.json();
+  const raw = data.files?.[GIST_FILE]?.content;
+  return raw ? JSON.parse(raw) : null;
+}
+
+async function gistSave(token, id, payload) {
+  const r = await fetch(`https://api.github.com/gists/${id}`, {
+    method: "PATCH",
+    headers: { Authorization: `token ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(payload) } } }),
+  });
+  if (!r.ok) throw new Error(`${r.status}`);
+}
+
+async function gistCreate(token, initialPayload) {
+  const r = await fetch("https://api.github.com/gists", {
+    method: "POST",
+    headers: { Authorization: `token ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      description: "Timeline — Mitterhofer / Hitthaler",
+      public: false,
+      files: { [GIST_FILE]: { content: JSON.stringify(initialPayload) } },
+    }),
+  });
+  if (!r.ok) throw new Error(`${r.status}`);
+  const data = await r.json();
+  return data.id;
+}
 
 const MONTHS_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -396,53 +438,78 @@ export default function App() {
   const [hoverEvent,   setHoverEvent]   = useState(null);
   const [zoom,         setZoom]         = useState(1);
   const [scrollLeft,   setScrollLeft]   = useState(0);
-  const [loaded,       setLoaded]       = useState(false);
-  const [famLoaded,    setFamLoaded]    = useState(false);
   const [familyEvents, setFamilyEvents] = useState([]);
-  const [famEvLoaded,  setFamEvLoaded]  = useState(false);
+  const [loaded,       setLoaded]       = useState(false);
+
+  // Gist sync state
+  const [gistToken,      setGistToken]      = useState(gistCreds.getToken);
+  const [gistId,         setGistId]         = useState(gistCreds.getGistId);
+  const [syncStatus,     setSyncStatus]     = useState("idle"); // idle | syncing | saved | error | offline
+  const [showGistSetup,  setShowGistSetup]  = useState(false);
+  const syncTimer   = useRef(null);
+  const initialLoad = useRef(true);
   const chartContainerRef = useRef(null);
 
   const currentYear = 2026, minYear = BIRTH_YEAR, maxYear = currentYear + 2;
 
-  // ── Load ──
+  // ── Unified load: Gist → localStorage → seed ──────────────────────────────
   useEffect(() => {
     (async () => {
       try {
-        if (claudeStore) { try { const r = await claudeStore.get("tl-v6"); if (r?.value) { const p=JSON.parse(r.value); if(Array.isArray(p)&&p.length){setEvents(p);setLoaded(true);return;} } } catch {} }
-        const p = store.load("tl-v6"); if (Array.isArray(p) && p.length) setEvents(p);
-      } catch {} finally { setLoaded(true); }
+        const tok = gistCreds.getToken(), id = gistCreds.getGistId();
+        if (tok && id) {
+          setSyncStatus("syncing");
+          try {
+            const g = await gistLoad(tok, id);
+            if (g) {
+              if (Array.isArray(g.tl)    && g.tl.length)    setEvents(g.tl);
+              if (Array.isArray(g.fam)   && g.fam.length)   setFamilyData(g.fam);
+              if (Array.isArray(g.famEv))                    setFamilyEvents(g.famEv);
+              setSyncStatus("saved");
+              setLoaded(true);
+              return;
+            }
+          } catch { setSyncStatus("error"); }
+        }
+        // Fall back to localStorage
+        const tl  = store.load("tl-v6");       if (Array.isArray(tl)  && tl.length)  setEvents(tl);
+        const fam = store.load("fam-v3");       if (Array.isArray(fam) && fam.length) setFamilyData(fam);
+        const fe  = store.load("fam-events-v1");if (Array.isArray(fe))                setFamilyEvents(fe);
+        // Claude artifact fallback
+        if (claudeStore) {
+          try { const r = await claudeStore.get("tl-v6");  if (r?.value) { const p=JSON.parse(r.value); if(Array.isArray(p)&&p.length) setEvents(p);      } } catch {}
+          try { const r = await claudeStore.get("fam-v3"); if (r?.value) { const p=JSON.parse(r.value); if(Array.isArray(p)&&p.length) setFamilyData(p); } } catch {}
+        }
+      } finally { setLoaded(true); initialLoad.current = false; }
     })();
-  }, []);
-  useEffect(() => {
-    if (!loaded) return;
-    store.save("tl-v6", events);
-    if (claudeStore) try { claudeStore.set("tl-v6", JSON.stringify(events)); } catch {}
-  }, [events, loaded]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Always mirror to localStorage (offline fallback) ──────────────────────
+  useEffect(() => { if (loaded) store.save("tl-v6",        events);       }, [events,       loaded]);
+  useEffect(() => { if (loaded) store.save("fam-v3",       familyData);   }, [familyData,   loaded]);
+  useEffect(() => { if (loaded) store.save("fam-events-v1",familyEvents); }, [familyEvents, loaded]);
+
+  // ── Debounced Gist sync on every data change ───────────────────────────────
   useEffect(() => {
-    (async () => {
+    if (!loaded)         return;
+    if (!gistToken || !gistId) return;
+    if (syncStatus === "syncing") return; // already in flight
+    setSyncStatus("idle");
+    clearTimeout(syncTimer.current);
+    syncTimer.current = setTimeout(async () => {
+      setSyncStatus("syncing");
       try {
-        if (claudeStore) { try { const r = await claudeStore.get("fam-v3"); if (r?.value) { const p=JSON.parse(r.value); if(Array.isArray(p)&&p.length){setFamilyData(p);setFamLoaded(true);return;} } } catch {} }
-        const p = store.load("fam-v3"); if (Array.isArray(p) && p.length) setFamilyData(p);
-      } catch {} finally { setFamLoaded(true); }
-    })();
-  }, []);
-  useEffect(() => {
-    if (!famLoaded) return;
-    store.save("fam-v3", familyData);
-    if (claudeStore) try { claudeStore.set("fam-v3", JSON.stringify(familyData)); } catch {}
-  }, [familyData, famLoaded]);
-
-  useEffect(() => {
-    (async () => {
-      try { const p = store.load("fam-events-v1"); if (Array.isArray(p)) setFamilyEvents(p); }
-      catch {} finally { setFamEvLoaded(true); }
-    })();
-  }, []);
-  useEffect(() => {
-    if (!famEvLoaded) return;
-    store.save("fam-events-v1", familyEvents);
-  }, [familyEvents, famEvLoaded]);
+        await gistSave(gistToken, gistId, {
+          tl: events, fam: familyData, famEv: familyEvents,
+          savedAt: new Date().toISOString(),
+        });
+        setSyncStatus("saved");
+      } catch (e) {
+        setSyncStatus(e.message === "401" ? "expired" : navigator.onLine ? "error" : "offline");
+      }
+    }, 2500);
+    return () => clearTimeout(syncTimer.current);
+  }, [events, familyData, familyEvents, gistToken, gistId, loaded]); // eslint-disable-line
 
   // ── Family births & deaths track (auto-derived from familyData) ──
   const familyLineEvents = useMemo(() => {
@@ -502,6 +569,33 @@ export default function App() {
       <header style={S.header}>
         <h1 style={S.h1}>Timeline</h1>
         <span style={{ fontSize:11, color:"#c4c0b6", marginLeft:8, alignSelf:"flex-end", paddingBottom:4 }}>v4 · Jun 2026</span>
+
+        {/* Sync status */}
+        <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:10 }}>
+          {gistId ? (
+            <span
+              style={{ fontSize:11, cursor:"pointer",
+                color: syncStatus==="saved"?"#1D9E75"
+                     : syncStatus==="expired"?"#E15554"
+                     : syncStatus==="error"||syncStatus==="offline"?"#D98032"
+                     : "#a39f95" }}
+              title={syncStatus==="expired" ? "Token expired — click to update" : "Click to manage sync"}
+              onClick={() => setShowGistSetup(true)}>
+              { syncStatus==="syncing"  ? "⟳ syncing…"
+              : syncStatus==="saved"   ? "✓ synced"
+              : syncStatus==="expired" ? "⚠ token expired"
+              : syncStatus==="error"   ? "⚠ sync error"
+              : syncStatus==="offline" ? "⊘ offline"
+              : "☁ sync on" }
+            </span>
+          ) : (
+            <button onClick={() => setShowGistSetup(true)}
+              style={{ fontSize:11, color:"#a39f95", background:"none", border:"1px solid #ddd8cd", borderRadius:6, padding:"3px 10px", cursor:"pointer", fontFamily:"inherit" }}>
+              ☁ Enable sync
+            </button>
+          )}
+        </div>
+
         <div style={S.tabs}>
           <button onClick={() => setView("family")}
             style={{...S.tab,...(view==="family"?S.tabActive:{})}}>Family</button>
@@ -736,6 +830,25 @@ export default function App() {
         <EventModal event={editing} tracks={TRACK_DEFS.filter(t=>!t.derived)} minYear={minYear} maxYear={maxYear} birthYear={BIRTH_YEAR}
           onSave={saveEvent} onDelete={editing?deleteEvent:null}
           onClose={()=>{setEditing(null);setAdding(false);}}/>
+      )}
+      {showGistSetup && (
+        <GistSetupModal
+          currentToken={gistToken} currentGistId={gistId}
+          currentData={{ tl: events, fam: familyData, famEv: familyEvents }}
+          onSave={async (token, id, isNew) => {
+            gistCreds.save(token, id);
+            setGistToken(token); setGistId(id);
+            setShowGistSetup(false);
+            if (isNew) {
+              // Push current data up immediately
+              setSyncStatus("syncing");
+              try { await gistSave(token, id, { tl:events, fam:familyData, famEv:familyEvents, savedAt:new Date().toISOString() }); setSyncStatus("saved"); }
+              catch { setSyncStatus("error"); }
+            }
+          }}
+          onDisconnect={() => { gistCreds.clear(); setGistToken(""); setGistId(""); setSyncStatus("idle"); setShowGistSetup(false); }}
+          onClose={() => setShowGistSetup(false)}
+        />
       )}
       {showPwModal && (
         <PasswordModal
@@ -1196,7 +1309,231 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
   );
 }
 
-// ── Add / Edit Family Event Modal ────────────────────────────────────────────
+// ── PersonModal ──────────────────────────────────────────────────────────────
+function PersonModal({ person, people, onSave, onDelete, onClose, onAddConnection }) {
+  const [name,      setName]      = useState(person.name      ?? "");
+  const [birthYear, setBirthYear] = useState(person.birthYear ?? "");
+  const [deathYear, setDeathYear] = useState(person.deathYear ?? "");
+  const [notes,     setNotes]     = useState(person.notes     ?? "");
+  const [role,      setRole]      = useState(person.role      ?? "");
+  const [gen,       setGen]       = useState(person.gen       ?? 4);
+  const [parentId1, setParentId1] = useState(person.parentId1 ?? "");
+  const [parentId2, setParentId2] = useState(person.parentId2 ?? "");
+  const GEN_LABELS = {
+    0:"Gen 0 — Great-great-grandparents", 1:"Gen 1 — Great-grandparents",
+    2:"Gen 2 — Grandparents & siblings",  3:"Gen 3 — Parents, aunts & uncles",
+    4:"Gen 4 — Your generation",          5:"Gen 5 — Children & nephews",
+  };
+  const parentOptions = people
+    ? people.filter(p => p.id !== person.id && p.gen < gen && p.name).sort((a,b) => b.gen - a.gen)
+    : [];
+  useEscapeKey(onClose);
+  return (
+    <div style={S.overlay} onClick={onClose}>
+      <div style={S.modal} onClick={e => e.stopPropagation()}>
+        <h3 style={S.modalTitle}>{person.name || person.role || "Person"}</h3>
+        <label style={S.field}><span style={S.fieldLabel}>Name</span>
+          <input style={S.input} value={name} onChange={e => setName(e.target.value)} autoFocus /></label>
+        <div style={S.row}>
+          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Born</span>
+            <input style={S.input} type="number" min={1800} max={2024} value={birthYear} placeholder="e.g. 1932"
+              onChange={e => setBirthYear(e.target.value ? parseInt(e.target.value) : "")} /></label>
+          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Died (if applicable)</span>
+            <input style={S.input} type="number" min={1800} max={2026} value={deathYear} placeholder="optional"
+              onChange={e => setDeathYear(e.target.value ? parseInt(e.target.value) : "")} /></label>
+        </div>
+        <label style={S.field}><span style={S.fieldLabel}>Role / description</span>
+          <input style={S.input} value={role} onChange={e => setRole(e.target.value)} placeholder="e.g. Farmer, Terlan" /></label>
+        <label style={S.field}><span style={S.fieldLabel}>Generation row (move if placed incorrectly)</span>
+          <select style={S.input} value={gen} onChange={e => setGen(parseInt(e.target.value))}>
+            {Object.entries(GEN_LABELS).map(([g, label]) => <option key={g} value={g}>{label}</option>)}
+          </select></label>
+        {parentOptions.length > 0 && (
+          <div style={S.row}>
+            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Parent 1</span>
+              <select style={S.input} value={parentId1||""} onChange={e => setParentId1(e.target.value||null)}>
+                <option value="">— none —</option>
+                {parentOptions.map(p => <option key={p.id} value={p.id}>{p.name} ({p.role})</option>)}
+              </select></label>
+            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Parent 2</span>
+              <select style={S.input} value={parentId2||""} onChange={e => setParentId2(e.target.value||null)}>
+                <option value="">— none —</option>
+                {parentOptions.map(p => <option key={p.id} value={p.id}>{p.name} ({p.role})</option>)}
+              </select></label>
+          </div>
+        )}
+        <label style={S.field}><span style={S.fieldLabel}>Notes — occupation, hometown, anything known</span>
+          <textarea style={{ ...S.input, minHeight:70, resize:"vertical" }} value={notes}
+            onChange={e => setNotes(e.target.value)} /></label>
+        <div style={S.modalActions}>
+          {onDelete && <button style={S.deleteBtn} onClick={() => { if (window.confirm("Remove this person?")) onDelete(person.id); }}>Remove</button>}
+          <div style={{ flex:1 }} />
+          <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
+          <button style={S.saveBtn} onClick={() => onSave({ ...person, name:name.trim(), birthYear:birthYear||null, deathYear:deathYear||null, notes:notes.trim(), role:role.trim()||person.role, gen, parentId1:parentId1||null, parentId2:parentId2||null })}>Save</button>
+        </div>
+        <div style={{ borderTop:"1.5px solid #ece8df", marginTop:20, paddingTop:16 }}>
+          <div style={{ fontSize:11, fontWeight:700, color:"#a39f95", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:10 }}>
+            Add a connection to {name||person.role}
+          </div>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:7 }}>
+            {[["child","＋ Child"],["parent","＋ Parent"],["sibling","＋ Sibling"],["partner","＋ Partner"],
+              ["grandparent","＋ Grandparent"],["auntuncle","＋ Aunt / Uncle"],["cousin","＋ Cousin"],["greatgrandparent","＋ Great-grandparent"]
+            ].map(([type, label]) => (
+              <button key={type} onClick={() => onAddConnection(type)} style={S.connectBtn}>{label}</button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── AddPersonModal ────────────────────────────────────────────────────────────
+function AddPersonModal({ people, prefilledRelType, prefilledRef, onAdd, onClose }) {
+  const [relType, setRelType] = useState(prefilledRelType || "parent");
+  const [refId,   setRefId]   = useState(prefilledRef?.id || people[0]?.id || "");
+  const [name,    setName]    = useState("");
+  const [birthYear,setBirthYear]=useState("");
+  const [deathYear,setDeathYear]=useState("");
+  const [notes,   setNotes]   = useState("");
+  useEscapeKey(onClose);
+  const isPrefilled = !!(prefilledRelType && prefilledRef);
+  const ref = prefilledRef || people.find(p => p.id === refId);
+  const genMap = { parent:-1, sibling:0, partner:0, grandparent:-2, greatgrandparent:-3, greatgreatgrandparent:-4, auntuncle:-1, cousin:0, child:1 };
+  const genOffset = genMap[relType] ?? 0;
+  const computedGen = ref ? ref.gen + genOffset : 4;
+  const genLabel = { 0:"Great-great-grandparents", 1:"Great-grandparents", 2:"Grandparents", 3:"Parents", 4:"You / siblings", 5:"Children / nephews" };
+  const relLabel = { parent:"parent", sibling:"sibling", partner:"partner", grandparent:"grandparent", greatgrandparent:"great-grandparent", greatgreatgrandparent:"great-great-grandparent", auntuncle:"aunt/uncle", cousin:"cousin", child:"child" };
+  const roleDefault = { parent:"Parent", sibling:"Sibling", partner:"Partner", grandparent:"Grandparent", greatgrandparent:"Great-grandparent", greatgreatgrandparent:"Great-great-grandparent", auntuncle:"Aunt / Uncle", cousin:"Cousin", child:"Child" };
+  return (
+    <div style={S.overlay} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth:480 }} onClick={e => e.stopPropagation()}>
+        <h3 style={S.modalTitle}>
+          {isPrefilled ? `Add ${relLabel[relType]} of ${prefilledRef.name || prefilledRef.role}` : "Add a family member"}
+        </h3>
+        {!isPrefilled && (
+          <div style={S.row}>
+            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Relationship</span>
+              <select style={S.input} value={relType} onChange={e => setRelType(e.target.value)}>
+                {Object.entries(relLabel).map(([k,v]) => <option key={k} value={k}>{v.charAt(0).toUpperCase()+v.slice(1)} of…</option>)}
+              </select></label>
+            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>…this person</span>
+              <select style={S.input} value={refId} onChange={e => setRefId(e.target.value)}>
+                {people.map(p => <option key={p.id} value={p.id}>{p.name || `[${p.role}]`}</option>)}
+              </select></label>
+          </div>
+        )}
+        {ref && (
+          <div style={S.durationPill}>
+            <span style={{ color:"#1D9E75", fontWeight:700 }}>{genLabel[computedGen] || `Gen ${computedGen}`}</span>
+            <span style={{ color:"#a39f95" }}> · {relLabel[relType]} of {ref.name || ref.role}</span>
+          </div>
+        )}
+        <label style={S.field}><span style={S.fieldLabel}>Name</span>
+          <input style={S.input} value={name} onChange={e => setName(e.target.value)}
+            placeholder="First and/or family name" autoFocus /></label>
+        <div style={S.row}>
+          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Born</span>
+            <input style={S.input} type="number" min={1800} max={2030} value={birthYear} placeholder="optional"
+              onChange={e => setBirthYear(e.target.value ? parseInt(e.target.value) : "")} /></label>
+          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Died</span>
+            <input style={S.input} type="number" min={1800} max={2030} value={deathYear} placeholder="optional"
+              onChange={e => setDeathYear(e.target.value ? parseInt(e.target.value) : "")} /></label>
+        </div>
+        <label style={S.field}><span style={S.fieldLabel}>Notes (optional)</span>
+          <textarea style={{ ...S.input, minHeight:50, resize:"vertical" }} value={notes}
+            onChange={e => setNotes(e.target.value)} /></label>
+        <div style={S.modalActions}>
+          <div style={{ flex:1 }} />
+          <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
+          <button style={S.saveBtn}
+            onClick={() => { onAdd({ name:name.trim(), birthYear:birthYear||null, deathYear:deathYear||null, notes:notes.trim(), role:roleDefault[relType] }, relType, refId); onClose(); }}>
+            Add person
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── EventModal ────────────────────────────────────────────────────────────────
+function EventModal({ event, tracks, minYear, maxYear, birthYear, onSave, onDelete, onClose }) {
+  const [startStr, setStartStr] = useState(() => formatDateInput(event?.year, event?.month, event?.day));
+  const [endStr,   setEndStr]   = useState(() => formatDateInput(event?.endYear, event?.endMonth, event?.endDay));
+  const [track,    setTrack]    = useState(event?.track ?? "self");
+  const [title,    setTitle]    = useState(event?.title ?? "");
+  const [note,     setNote]     = useState(event?.note  ?? "");
+  const sp = parseDate(startStr);
+  const ep = parseDate(endStr);
+  const startOk  = sp !== false;
+  const endOk    = ep !== false;
+  const hasStart = sp && sp !== false;
+  const isRange  = hasStart && ep && ep !== false &&
+    dateToFY(ep.year, ep.month, ep.day) > dateToFY(sp.year, sp.month, sp.day);
+  const startAge = hasStart ? ageAt(sp.year, sp.month, sp.day, birthYear) : null;
+  const endAge   = (isRange && ep) ? ageAt(ep.year, ep.month, ep.day, birthYear) : null;
+  const durYrs   = isRange
+    ? (dateToFY(ep.year,ep.month,ep.day) - dateToFY(sp.year,sp.month,sp.day)).toFixed(1) : null;
+  const preview  = parsed => parsed && parsed !== false
+    ? `${formatDate(parsed.year, parsed.month, parsed.day)} · age ${ageAt(parsed.year, parsed.month, parsed.day, birthYear)}`
+    : null;
+  const fieldBorder = (str, ok) => str && !ok ? "#E15554" : str && ok ? "#1D9E75" : undefined;
+  const canSave = title.trim() && hasStart && startOk && endOk;
+  useEscapeKey(onClose);
+  return (
+    <div style={S.overlay} onClick={onClose}>
+      <div style={S.modal} onClick={e => e.stopPropagation()}>
+        <h3 style={S.modalTitle}>{event ? "Edit moment" : "Add a moment"}</h3>
+        <label style={S.field}><span style={S.fieldLabel}>Title</span>
+          <input style={S.input} value={title} onChange={e => setTitle(e.target.value)}
+            placeholder="e.g. Born in Innichen" autoFocus /></label>
+        <label style={S.field}>
+          <span style={S.fieldLabel}>Start date{preview(sp) ? <span style={{ color:"#1D9E75", fontWeight:600 }}> — {preview(sp)}</span> : null}</span>
+          <input style={{ ...S.input, borderColor: fieldBorder(startStr, startOk) }}
+            value={startStr} onChange={e => setStartStr(e.target.value)}
+            placeholder="YYYY  ·  MM/YYYY  ·  DD/MM/YYYY" />
+          {startStr && !startOk && <div style={S.dateError}>Try: 1990 · 05/1990 · 25/05/1990</div>}
+        </label>
+        <label style={S.field}>
+          <span style={S.fieldLabel}>End date{preview(ep)
+            ? <span style={{ color:"#1D9E75", fontWeight:600 }}> — {preview(ep)}</span>
+            : <span style={{ color:"#b0ab9f" }}> (optional — leave blank for a point event)</span>}
+          </span>
+          <input style={{ ...S.input, borderColor: fieldBorder(endStr, endOk) }}
+            value={endStr} onChange={e => setEndStr(e.target.value)}
+            placeholder="YYYY  ·  MM/YYYY  ·  DD/MM/YYYY" />
+          {endStr && !endOk && <div style={S.dateError}>Try: 2015 · 09/2015 · 30/09/2015</div>}
+        </label>
+        {isRange && (
+          <div style={S.durationPill}>
+            <span style={{ color:"#1D9E75", fontWeight:700 }}>{durYrs} yrs</span>
+            <span style={{ color:"#a39f95" }}> · ages {startAge}–{endAge} · shows as bar</span>
+          </div>
+        )}
+        <label style={S.field}><span style={S.fieldLabel}>Track</span>
+          <select style={S.input} value={track} onChange={e => setTrack(e.target.value)}>
+            {tracks.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+          </select></label>
+        <label style={S.field}><span style={S.fieldLabel}>Note (optional)</span>
+          <textarea style={{ ...S.input, minHeight:60, resize:"vertical" }} value={note}
+            onChange={e => setNote(e.target.value)} placeholder="What this meant, how it felt…" /></label>
+        <div style={S.modalActions}>
+          {onDelete && <button style={S.deleteBtn} onClick={() => onDelete(event.id)}>Delete</button>}
+          <div style={{ flex:1 }} />
+          <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
+          <button style={S.saveBtn} disabled={!canSave}
+            onClick={() => onSave({
+              ...(event||{}), year:sp.year, month:sp.month||null, day:sp.day||null,
+              endYear:isRange?ep.year:null, endMonth:isRange?ep.month||null:null, endDay:isRange?ep.day||null:null,
+              track, title:title.trim(), note:note.trim(),
+            })}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Add / Edit Family Event Modal ─────────────────────────────────────────────
 function AddFamilyEventModal({ event, onSave, onDelete, onClose }) {
   const [year,  setYear]  = useState(event?.year  ?? 1990);
   const [title, setTitle] = useState(event?.title ?? "");
@@ -1250,7 +1587,89 @@ function AddFamilyEventModal({ event, onSave, onDelete, onClose }) {
   );
 }
 
-// ── Password modal ───────────────────────────────────────────────────────────
+// ── Gist Setup Modal ──────────────────────────────────────────────────────────
+function GistSetupModal({ currentToken, currentGistId, currentData, onSave, onDisconnect, onClose }) {
+  const [token,  setToken]  = useState(currentToken  || "");
+  const [gistId, setGistId] = useState(currentGistId || "");
+  const [status, setStatus] = useState("idle"); // idle | working | ok | error
+  const [msg,    setMsg]    = useState("");
+  useEscapeKey(onClose);
+
+  const connect = async () => {
+    if (!token.trim()) { setMsg("Token is required."); return; }
+    setStatus("working"); setMsg("");
+    try {
+      let id = gistId.trim();
+      let isNew = false;
+      if (!id) {
+        // Create a new Gist with current data
+        setMsg("Creating Gist…");
+        id = await gistCreate(token.trim(), {
+          tl: currentData.tl, fam: currentData.fam, famEv: currentData.famEv,
+          savedAt: new Date().toISOString(),
+        });
+        isNew = true;
+      } else {
+        // Verify existing Gist is accessible
+        setMsg("Verifying…");
+        await gistLoad(token.trim(), id);
+      }
+      setStatus("ok");
+      setMsg(isNew ? `✓ Gist created (ID: ${id})` : "✓ Connected");
+      setTimeout(() => onSave(token.trim(), id, isNew), 800);
+    } catch (e) {
+      setStatus("error");
+      setMsg(`Error: ${e.message === "401" ? "Invalid token — check it has 'gist' scope." : e.message === "404" ? "Gist not found — check the ID." : "Connection failed. Try again."}`);
+    }
+  };
+
+  return (
+    <div style={S.overlay} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth:500 }} onClick={e => e.stopPropagation()}>
+        <h3 style={S.modalTitle}>☁ Sync to GitHub</h3>
+        <p style={{ fontSize:13, color:"#6b6a64", marginBottom:20, lineHeight:1.6 }}>
+          Your data is saved to a private GitHub Gist — accessible from any browser or device, automatically, in the background.
+        </p>
+
+        <div style={{ background:"#f8f7f3", border:"1px solid #ece8df", borderRadius:8, padding:"12px 16px", marginBottom:16 }}>
+          <div style={{ fontWeight:700, fontSize:13, marginBottom:8 }}>Step 1 — Create a token</div>
+          <p style={{ fontSize:12, color:"#6b6a64", margin:0, lineHeight:1.6 }}>
+            Go to <a href="https://github.com/settings/tokens/new?description=Timeline+sync&scopes=gist" target="_blank" rel="noreferrer" style={{ color:"#3D9BE0" }}>github.com/settings/tokens/new</a>, name it <em>Timeline sync</em>, check only <strong>gist</strong>, set expiration to <strong>No expiration</strong>, click Generate, copy the token.
+          </p>
+        </div>
+
+        <label style={S.field}>
+          <span style={S.fieldLabel}>Personal Access Token</span>
+          <input style={S.input} type="password" value={token}
+            onChange={e => setToken(e.target.value)} placeholder="ghp_xxxxxxxxxxxx" autoFocus />
+        </label>
+
+        <label style={S.field}>
+          <span style={S.fieldLabel}>Gist ID — leave blank to create one automatically</span>
+          <input style={S.input} value={gistId}
+            onChange={e => setGistId(e.target.value)} placeholder="leave blank for first-time setup" />
+        </label>
+
+        {msg && <p style={{ fontSize:12, color: status==="error"?"#E15554":"#1D9E75", margin:"0 0 14px" }}>{msg}</p>}
+
+        <div style={S.modalActions}>
+          {currentGistId && (
+            <button style={S.deleteBtn} onClick={() => { if (window.confirm("Disconnect sync? Your local data stays safe.")) onDisconnect(); }}>
+              Disconnect
+            </button>
+          )}
+          <div style={{ flex:1 }} />
+          <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
+          <button style={S.saveBtn} onClick={connect} disabled={status === "working"}>
+            {status === "working" ? "Connecting…" : currentGistId ? "Update" : "Connect & sync"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Password modal ────────────────────────────────────────────────────────────
 function PasswordModal({ onSuccess, onClose }) {
   const [pw,  setPw]  = useState("");
   const [err, setErr] = useState(false);
