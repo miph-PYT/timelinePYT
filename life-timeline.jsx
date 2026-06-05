@@ -104,11 +104,11 @@ const FAMILY_DEFAULT = [
 const TRACK_DEFS = [
   { id:"self",       label:"Self / inner",           color:"#C9A227" },
   { id:"family",     label:"Family",                  color:"#E15554" },
-  { id:"familyline", label:"Family: births & deaths", color:"#7B6545", derived:true },
+  { id:"familyline", label:"Geburten & Tode", color:"#7B6545", derived:true },
   { id:"places",     label:"Places lived",            color:"#4A9E8A" },
   { id:"school",     label:"School",                  color:"#D98032" },
-  { id:"vocation",   label:"Vocation",                color:"#1D9E75" },
-  { id:"friends",    label:"Friends",                 color:"#3D9BE0" },
+  { id:"vocation",   label:"Beruf / Berufung",                color:"#1D9E75" },
+  { id:"friends",    label:"Freunde",                 color:"#3D9BE0" },
   { id:"love",       label:"Love",                    color:"#D4537E" },
   { id:"body",       label:"Body / practice",         color:"#7B4FB0" },
 ];
@@ -117,7 +117,7 @@ const BIRTH_YEAR = 1990;
 const SEED_EVENTS = [
 
   // ─── SELF ─────────────────────────────────────────────────────────────
-  { id:"s1",  year:1990, month:5, day:25,           track:"self",     title:"Born in Innichen",            note:"25 May 1990, Innichen / San Candido, South Tyrol" },
+  { id:"s1",  year:1990, month:5, day:25,           track:"self",     title:"z.B. Geburt in Innichen",            note:"25 May 1990, Innichen / San Candido, South Tyrol" },
   { id:"s2",  year:2016,              track:"self",     title:"First acid trip",             note:"Bolsjefabrikken — first psychedelic experience" },
   { id:"s3",  year:2017,              track:"self",     title:"No stability / shame",        note:"Anxiety, no direction, drinking as coping" },
   { id:"s4",  year:2018,              track:"self",     title:"Mushroom ceremony",           note:"Femø — meeting Magnus, opening up" },
@@ -422,6 +422,9 @@ function computeGenY(people, nodeH = 56, gap = 130) {
 // ════════════════════════════════════════════════════════════════
 // APP
 
+// ── Family password (anyone with this can edit via the shared link) ───────────
+const FAMILY_PW = atob("U3RhbW1iYXVtTUlUSElU"); // obfuscated but not secret
+
 // ════════════════════════════════════════════════════════════════
 // APP
 // ════════════════════════════════════════════════════════════════
@@ -442,14 +445,21 @@ export default function App() {
   const [loaded,       setLoaded]       = useState(false);
 
   // Gist sync state
-  const [gistToken,      setGistToken]      = useState(gistCreds.getToken);
-  const [gistId,         setGistId]         = useState(gistCreds.getGistId);
-  const [syncStatus,     setSyncStatus]     = useState("idle"); // idle | syncing | saved | error | offline
-  const [showGistSetup,  setShowGistSetup]  = useState(false);
-  const syncTimer   = useRef(null);
-  const initialLoad = useRef(true);
-  const chartContainerRef = useRef(null);
+  const [gistToken,     setGistToken]     = useState(gistCreds.getToken);
+  const [gistId,        setGistId]        = useState(gistCreds.getGistId);
+  const [syncStatus,    setSyncStatus]    = useState("idle");
+  const [showGistSetup, setShowGistSetup] = useState(false);
 
+  // Family access state
+  // isFamilyMode = opened via ?g=GISTID link (no personal token)
+  const urlGistId     = useMemo(() => new URLSearchParams(window.location.search).get("g") || "", []);
+  const isFamilyMode  = !!urlGistId && !gistCreds.getToken();
+  const [famEditOn,    setFamEditOn]    = useState(() => { try { return sessionStorage.getItem("fam_edit")==="1"; } catch { return false; } });
+  const [showFamPw,    setShowFamPw]    = useState(false);
+  const readOnly      = isFamilyMode && !famEditOn;
+
+  const syncTimer   = useRef(null);
+  const chartContainerRef = useRef(null);
   const currentYear = 2026, minYear = BIRTH_YEAR, maxYear = currentYear + 2;
 
   // ── Unified load: Gist → localStorage → seed ──────────────────────────────
@@ -457,55 +467,77 @@ export default function App() {
     (async () => {
       try {
         const tok = gistCreds.getToken(), id = gistCreds.getGistId();
+
+        // Owner mode: authenticated load
         if (tok && id) {
           setSyncStatus("syncing");
           try {
             const g = await gistLoad(tok, id);
             if (g) {
-              if (Array.isArray(g.tl)    && g.tl.length)    setEvents(g.tl);
-              if (Array.isArray(g.fam)   && g.fam.length)   setFamilyData(g.fam);
-              if (Array.isArray(g.famEv))                    setFamilyEvents(g.famEv);
-              setSyncStatus("saved");
-              setLoaded(true);
-              return;
+              if (Array.isArray(g.tl)  && g.tl.length)  setEvents(g.tl);
+              if (Array.isArray(g.fam) && g.fam.length)  setFamilyData(g.fam);
+              if (Array.isArray(g.famEv))                 setFamilyEvents(g.famEv);
+              setSyncStatus("saved"); setLoaded(true); return;
             }
           } catch { setSyncStatus("error"); }
         }
+
+        // Family mode: anonymous read via ?g= URL param
+        if (urlGistId && !tok) {
+          try {
+            const r = await fetch(`https://api.github.com/gists/${urlGistId}`);
+            if (r.ok) {
+              const data = await r.json();
+              const raw  = data.files?.[GIST_FILE]?.content;
+              if (raw) {
+                const g = JSON.parse(raw);
+                if (Array.isArray(g.tl)  && g.tl.length)  setEvents(g.tl);
+                if (Array.isArray(g.fam) && g.fam.length)  setFamilyData(g.fam);
+                if (Array.isArray(g.famEv))                 setFamilyEvents(g.famEv);
+                // Store owner token in session only (never persisted to localStorage)
+                if (g._t) { try { sessionStorage.setItem("fam_tok", g._t); sessionStorage.setItem("fam_gid", urlGistId); } catch {} }
+                setSyncStatus("saved"); setLoaded(true); return;
+              }
+            }
+          } catch {}
+        }
+
         // Fall back to localStorage
-        const tl  = store.load("tl-v6");       if (Array.isArray(tl)  && tl.length)  setEvents(tl);
-        const fam = store.load("fam-v3");       if (Array.isArray(fam) && fam.length) setFamilyData(fam);
-        const fe  = store.load("fam-events-v1");if (Array.isArray(fe))                setFamilyEvents(fe);
-        // Claude artifact fallback
+        const tl  = store.load("tl-v6");        if (Array.isArray(tl)  && tl.length)  setEvents(tl);
+        const fam = store.load("fam-v3");        if (Array.isArray(fam) && fam.length) setFamilyData(fam);
+        const fe  = store.load("fam-events-v1"); if (Array.isArray(fe))                setFamilyEvents(fe);
         if (claudeStore) {
-          try { const r = await claudeStore.get("tl-v6");  if (r?.value) { const p=JSON.parse(r.value); if(Array.isArray(p)&&p.length) setEvents(p);      } } catch {}
+          try { const r = await claudeStore.get("tl-v6");  if (r?.value) { const p=JSON.parse(r.value); if(Array.isArray(p)&&p.length) setEvents(p);     } } catch {}
           try { const r = await claudeStore.get("fam-v3"); if (r?.value) { const p=JSON.parse(r.value); if(Array.isArray(p)&&p.length) setFamilyData(p); } } catch {}
         }
-      } finally { setLoaded(true); initialLoad.current = false; }
+      } finally { setLoaded(true); }
     })();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // eslint-disable-line
 
-  // ── Always mirror to localStorage (offline fallback) ──────────────────────
-  useEffect(() => { if (loaded) store.save("tl-v6",        events);       }, [events,       loaded]);
-  useEffect(() => { if (loaded) store.save("fam-v3",       familyData);   }, [familyData,   loaded]);
-  useEffect(() => { if (loaded) store.save("fam-events-v1",familyEvents); }, [familyEvents, loaded]);
+  // ── Always mirror to localStorage ─────────────────────────────────────────
+  useEffect(() => { if (loaded) store.save("tl-v6",         events);      }, [events,       loaded]);
+  useEffect(() => { if (loaded) store.save("fam-v3",        familyData);  }, [familyData,   loaded]);
+  useEffect(() => { if (loaded) store.save("fam-events-v1", familyEvents);}, [familyEvents, loaded]);
 
-  // ── Debounced Gist sync on every data change ───────────────────────────────
+  // ── Debounced Gist sync ────────────────────────────────────────────────────
   useEffect(() => {
-    if (!loaded)         return;
-    if (!gistToken || !gistId) return;
-    if (syncStatus === "syncing") return; // already in flight
+    if (!loaded) return;
+    // Use owner token OR session token from family mode
+    const tok = gistToken || (()=>{ try { return sessionStorage.getItem("fam_tok")||""; } catch { return ""; } })();
+    const gid = gistId    || (()=>{ try { return sessionStorage.getItem("fam_gid")||""; } catch { return ""; } })();
+    if (!tok || !gid) return;
     setSyncStatus("idle");
     clearTimeout(syncTimer.current);
     syncTimer.current = setTimeout(async () => {
       setSyncStatus("syncing");
       try {
-        await gistSave(gistToken, gistId, {
-          tl: events, fam: familyData, famEv: familyEvents,
-          savedAt: new Date().toISOString(),
-        });
+        // Embed owner token in Gist so family mode can retrieve it
+        const payload = { tl:events, fam:familyData, famEv:familyEvents, savedAt:new Date().toISOString() };
+        if (gistToken) payload._t = gistToken; // only owner embeds their own token
+        await gistSave(tok, gid, payload);
         setSyncStatus("saved");
-      } catch (e) {
-        setSyncStatus(e.message === "401" ? "expired" : navigator.onLine ? "error" : "offline");
+      } catch(e) {
+        setSyncStatus(e.message==="401" ? "expired" : navigator.onLine ? "error" : "offline");
       }
     }, 2500);
     return () => clearTimeout(syncTimer.current);
@@ -567,41 +599,53 @@ export default function App() {
     <div style={S.page}>
       <style>{CSS}</style>
       <header style={S.header}>
-        <h1 style={S.h1}>Timeline</h1>
+        <h1 style={S.h1}>Zeitleiste</h1>
         <span style={{ fontSize:11, color:"#c4c0b6", marginLeft:8, alignSelf:"flex-end", paddingBottom:4 }}>v4 · Jun 2026</span>
 
-        {/* Sync status */}
         <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:10 }}>
-          {gistId ? (
-            <span
-              style={{ fontSize:11, cursor:"pointer",
-                color: syncStatus==="saved"?"#1D9E75"
-                     : syncStatus==="expired"?"#E15554"
-                     : syncStatus==="error"||syncStatus==="offline"?"#D98032"
-                     : "#a39f95" }}
-              title={syncStatus==="expired" ? "Token expired — click to update" : "Click to manage sync"}
+
+          {/* Family mode: show edit toggle */}
+          {isFamilyMode && (
+            famEditOn ? (
+              <span style={{ fontSize:12, color:"#1D9E75", fontWeight:600 }}>✏ Bearbeitung aktiv</span>
+            ) : (
+              <button onClick={() => setShowFamPw(true)}
+                style={{ fontSize:12, color:"#D98032", background:"none", border:"1.5px solid #D98032", borderRadius:6, padding:"3px 10px", cursor:"pointer", fontFamily:"inherit", fontWeight:600 }}>
+                🔓 Edit mode
+              </button>
+            )
+          )}
+
+          {/* Owner: sync status + family link */}
+          {!isFamilyMode && gistId && (<>
+            <span style={{ fontSize:11, cursor:"pointer",
+              color: syncStatus==="saved"?"#1D9E75":syncStatus==="expired"?"#E15554":syncStatus==="error"||syncStatus==="offline"?"#D98032":"#a39f95" }}
+              title={syncStatus==="expired"?"Token expired — click to update":"Click to manage sync"}
               onClick={() => setShowGistSetup(true)}>
-              { syncStatus==="syncing"  ? "⟳ syncing…"
-              : syncStatus==="saved"   ? "✓ synced"
-              : syncStatus==="expired" ? "⚠ token expired"
-              : syncStatus==="error"   ? "⚠ sync error"
-              : syncStatus==="offline" ? "⊘ offline"
-              : "☁ sync on" }
+              {syncStatus==="syncing"?"⟳ wird synchronisiert…":syncStatus==="saved"?"✓ synchronisiert":syncStatus==="expired"?"⚠ Token abgelaufen":syncStatus==="error"?"⚠ Synchronisierungsfehler":syncStatus==="offline"?"⊘ offline":"☁ Sync aktiv"}
             </span>
-          ) : (
+            <button onClick={() => {
+              const url = `${window.location.origin}${window.location.pathname}?g=${gistId}`;
+              navigator.clipboard?.writeText(url).catch(()=>{});
+              alert(`Familienlink kopiert:\n\n${url}\n\nDiesen Link mit der Familie teilen. Sie können den Baum sehen und mit dem Familienpasswort bearbeiten.`);
+            }} style={{ fontSize:11, color:"#a39f95", background:"none", border:"1px solid #ddd8cd", borderRadius:6, padding:"3px 10px", cursor:"pointer", fontFamily:"inherit" }}>
+              👪 Familienlink kopieren
+            </button>
+          </>)}
+          {!isFamilyMode && !gistId && (
             <button onClick={() => setShowGistSetup(true)}
               style={{ fontSize:11, color:"#a39f95", background:"none", border:"1px solid #ddd8cd", borderRadius:6, padding:"3px 10px", cursor:"pointer", fontFamily:"inherit" }}>
-              ☁ Enable sync
+              ☁ Sync aktivieren
             </button>
           )}
         </div>
 
         <div style={S.tabs}>
           <button onClick={() => setView("family")}
-            style={{...S.tab,...(view==="family"?S.tabActive:{})}}>Family</button>
+            style={{...S.tab,...(view==="family"?S.tabActive:{})}}>Familie</button>
           <button onClick={() => { if (tlUnlocked) setView("timeline"); else setShowPwModal(true); }}
-            style={{...S.tab,...(view==="timeline"?S.tabActive:{}), opacity: tlUnlocked?1:0.7}}>
-            {tlUnlocked ? "Timeline" : "🔒 Timeline"}
+            style={{...S.tab,...(view==="timeline"?S.tabActive:{}), opacity:tlUnlocked?1:0.7}}>
+            {tlUnlocked ? "Zeitleiste" : "🔒 Zeitleiste"}
           </button>
         </div>
       </header>
@@ -609,7 +653,8 @@ export default function App() {
       {view === "family" && (
         <FamilyPage familyData={familyData} setFamilyData={setFamilyData}
           familyEvents={familyEvents} setFamilyEvents={setFamilyEvents}
-          onReset={()=>{ if(window.confirm("Reset family tree?")) setFamilyData(FAMILY_DEFAULT); }} />
+          readOnly={readOnly}
+          onReset={()=>{ if(window.confirm("Stammbaum zurücksetzen?")) setFamilyData(FAMILY_DEFAULT); }} />
       )}
 
       {view === "timeline" && (
@@ -633,8 +678,8 @@ export default function App() {
                 <span style={{...S.trackDot,background:on?"#fff":t.color}}/>{t.label}
               </button>
             );})}
-            <button onClick={()=>setAdding(true)} style={S.addBtn}>+ Add event</button>
-            <button onClick={()=>{ if(window.confirm("Reset events?")) setEvents(SEED_EVENTS); }} style={S.resetBtn}>Reset</button>
+            <button onClick={()=>setAdding(true)} style={S.addBtn}>+ Ereignis hinzufügen</button>
+            <button onClick={()=>{ if(window.confirm("Ereignisse zurücksetzen?")) setEvents(SEED_EVENTS); }} style={S.resetBtn}>Reset</button>
           </div>
 
           {/* ── Zoom ── */}
@@ -822,7 +867,7 @@ export default function App() {
               </svg>
             </div>
           </section>
-          <p style={S.footnote}>Hover any event for details. Zoom 2× or higher to read labels. Ctrl+scroll to zoom.</p>
+          <p style={S.footnote}>Über ein Ereignis fahren für Details. Zoom 2× oder höher für Beschriftungen. Strg+Scrollen zum Zoomen.</p>
         </div>
       )}
 
@@ -830,6 +875,15 @@ export default function App() {
         <EventModal event={editing} tracks={TRACK_DEFS.filter(t=>!t.derived)} minYear={minYear} maxYear={maxYear} birthYear={BIRTH_YEAR}
           onSave={saveEvent} onDelete={editing?deleteEvent:null}
           onClose={()=>{setEditing(null);setAdding(false);}}/>
+      )}
+      {showFamPw && (
+        <FamilyPasswordModal
+          onSuccess={() => {
+            try { sessionStorage.setItem("fam_edit","1"); } catch {}
+            setFamEditOn(true); setShowFamPw(false);
+          }}
+          onClose={() => setShowFamPw(false)}
+        />
       )}
       {showGistSetup && (
         <GistSetupModal
@@ -863,7 +917,7 @@ export default function App() {
   );
 }
 
-function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], setFamilyEvents }) {
+function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], setFamilyEvents, readOnly = false }) {
   const [openEvent,        setOpenEvent]        = useState(null);
   const [editPerson,       setEditPerson]       = useState(null);
   const [addingPerson,     setAddingPerson]     = useState(false);
@@ -885,7 +939,7 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
     familyData.forEach(p => {
       if (!p.name) return;
       const short = p.name.split(' ')[0];
-      if (p.birthYear) out.push({ id:`ab_${p.id}`, year:p.birthYear, title:`${short} born`, color:"#1D9E75", desc:`${p.name} · ${p.role}` });
+      if (p.birthYear) out.push({ id:`ab_${p.id}`, year:p.birthYear, title:`${short} geboren`, color:"#1D9E75", desc:`${p.name} · ${p.role}` });
       if (p.deathYear) out.push({ id:`ad_${p.id}`, year:p.deathYear, title:`${short} †${p.deathYear}`, color:"#7B6545", desc:`${p.name} · ${p.role}` });
     });
     return out.sort((a,b) => a.year - b.year);
@@ -938,11 +992,11 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
   const sideCol = side => side === "paternal" ? "#D98032" : side === "maternal" ? "#3D9BE0" : "#C9A227";
   const genLabel = gen => {
     const labels = {
-      0:"Great-great-grandparents",
-      1:"Great-grandparents",
+      0:"Ururgroßeltern",
+      1:"Urgroßeltern",
       2:"Grandparents & their siblings",
       3:"Parents, aunts & uncles",
-      4:"You / siblings",
+      4:"Du / Geschwister",
       5:"Children & nephews",
     };
     return labels[gen] || `Generation ${gen > 5 ? "+" + (gen-4) : gen}`;
@@ -1000,8 +1054,15 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
       if (!pp || !qp) return;
       const x1 = Math.min(pp.x, qp.x) + pp.nw/2, x2 = Math.max(pp.x, qp.x) - pp.nw/2;
       if (x2 > x1) {
-        const y = (genY[person.gen] || 0) + NODE_H / 2;
-        out.push(<line key={`partner-${person.id}`} x1={x1} y1={y} x2={x2} y2={y} stroke="#595959" strokeWidth="2" strokeDasharray="4 3" />);
+        const y  = (genY[person.gen] || 0) + NODE_H / 2;
+        const mx = (x1 + x2) / 2;
+        out.push(
+          <g key={`partner-${person.id}`}>
+            <line x1={x1} y1={y} x2={mx-11} y2={y} stroke="#595959" strokeWidth="2" strokeDasharray="4 3" />
+            <text x={mx} y={y+5} textAnchor="middle" style={{ fontSize:14, fill:"#595959", fontFamily:"serif", userSelect:"none" }}>⚭</text>
+            <line x1={mx+11} y1={y} x2={x2} y2={y} stroke="#595959" strokeWidth="2" strokeDasharray="4 3" />
+          </g>
+        );
       }
       drawn.add(person.id); drawn.add(person.partnerId);
     });
@@ -1053,11 +1114,11 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
         <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:10, flexWrap:"wrap", gap:8 }}>
           <div style={S.sectionLabel}>Family tree</div>
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-            <button onClick={() => setAddingPerson(true)} style={S.addBtn}>+ Add person</button>
-            <button onClick={onReset} style={S.resetBtn}>Reset</button>
+            {!readOnly && <button onClick={() => setAddingPerson(true)} style={S.addBtn}>+ Person hinzufügen</button>}
+            {!readOnly && <button onClick={onReset} style={S.resetBtn}>Reset</button>}
           </div>
         </div>
-        <p style={S.schoolIntro}>Click any node to edit. Use &quot;+ Add person&quot; to extend the tree.</p>
+        <p style={S.schoolIntro}>Click any node to edit. Use &quot;+ Person hinzufügen&quot; to extend the tree.</p>
         <div style={{ background:"#fff", border:"1px solid #ece8df", borderRadius:14, overflowX:"auto" }}>
           <svg viewBox={`0 0 ${TREE_W} ${svgH}`} style={{ width:TREE_W, height:svgH, display:"block" }}>
             {/* generation labels */}
@@ -1074,12 +1135,30 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
             })}
             {/* paternal / maternal column divider */}
             <line x1={TREE_W/2} y1={30} x2={TREE_W/2} y2={svgH-20} stroke="#ece8df" strokeWidth="1" strokeDasharray="4 4" />
-            <text x={TREE_W/4} y={22} style={{ fontSize:10, fill:"#D98032", textAnchor:"middle", fontWeight:700, opacity:0.65 }}>← Paternal (Vater)</text>
-            <text x={3*TREE_W/4} y={22} style={{ fontSize:10, fill:"#3D9BE0", textAnchor:"middle", fontWeight:700, opacity:0.65 }}>Maternal (Mutter) →</text>
+            <text x={TREE_W/4} y={22} style={{ fontSize:10, fill:"#D98032", textAnchor:"middle", fontWeight:700, opacity:0.65 }}>← Väterlich</text>
+            <text x={3*TREE_W/4} y={22} style={{ fontSize:10, fill:"#3D9BE0", textAnchor:"middle", fontWeight:700, opacity:0.65 }}>Mütterlich →</text>
 
             {/* ── Connectors ── */}
             {connectors}
             {partnerLines}
+
+            {/* ── Birth (●) and death (†) symbols ── */}
+            {familyData.map(person => {
+              const cp = positions[person.id];
+              if (!cp || genY[person.gen] === undefined || !person.name) return null;
+              const { x, nw } = cp;
+              const y = genY[person.gen];
+              return (
+                <g key={`sym-${person.id}`} style={{ pointerEvents:"none" }}>
+                  {(person.parentId1 || person.parentId2) && (
+                    <circle cx={x} cy={y-7} r={4} fill="#1D9E75" stroke="#fff" strokeWidth="1.5"/>
+                  )}
+                  {person.deathYear && (
+                    <text x={x+nw/2-7} y={y+14} style={{ fontSize:12, fill:"#7B6545", fontWeight:900, fontFamily:"serif" }}>†</text>
+                  )}
+                </g>
+              );
+            })}
 
             {/* nodes */}
             {familyData.map(person => {
@@ -1097,7 +1176,7 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
               const roleFontSz = Math.max(7, Math.min(9, nw / 9));
               return (
                 <g key={person.id} style={{ cursor:"pointer" }}
-                  onClick={() => setEditPerson(person)}
+                  onClick={() => !readOnly && setEditPerson(person)}
                   onMouseEnter={() => setHoverP(person.id)}
                   onMouseLeave={() => setHoverP(null)}>
                   <rect x={x-nw/2} y={y} width={nw} height={NODE_H} rx={7}
@@ -1144,27 +1223,27 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
             })}
           </svg>
         </div>
-        <p style={S.footnote}>Paternal side left (amber), maternal right (blue). Click any node to edit or add connections.</p>
+        <p style={S.footnote}>Väterliche Seite links (bernstein), mütterliche Seite rechts (blau). Knoten anklicken zum Bearbeiten.</p>
       </section>
 
       {/* ══ HISTORICAL CONTEXT ══════════════════════════════════════════════ */}
       <section style={{ marginTop:40, paddingTop:24, borderTop:"1px solid #ece8df" }}>
         <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14, flexWrap:"wrap" }}>
-          <div style={S.sectionLabel}>Historical context</div>
+          <div style={S.sectionLabel}>Historischer Kontext</div>
           <div style={{ display:"flex", gap:6, marginLeft:"auto", flexWrap:"wrap" }}>
             {[
-              [showST,       setShowST,       "#D98032", "🏔 South Tyrol"],
+              [showST,       setShowST,       "#D98032", "🏔 Südtirol"],
               [showPust,     setShowPust,     "#4A9E8A", "🏘 Innichen / Bruneck"],
-              [showAutoFam,  setShowAutoFam,  "#1D9E75", "🌳 Family births & deaths"],
-              [showFamEv,    setShowFamEv,    "#C9A227", "📌 Family events"],
+              [showAutoFam,  setShowAutoFam,  "#1D9E75", "🌳 Geburten & Tode"],
+              [showFamEv,    setShowFamEv,    "#C9A227", "📌 Familienereignisse"],
             ].map(([on, set, col, label]) => (
               <button key={label} onClick={() => set(v => !v)}
                 style={{ ...S.trackToggle, borderColor:col, background:on?col:"transparent", color:on?"#fff":"#6b6a64", opacity:on?1:0.55 }}>
                 {label}
               </button>
             ))}
-            {setFamilyEvents && (
-              <button onClick={() => setAddingFamEv(true)} style={S.addBtn}>+ Add family event</button>
+            {!readOnly && setFamilyEvents && (
+              <button onClick={() => setAddingFamEv(true)} style={S.addBtn}>+ Familienereignis hinzufügen</button>
             )}
           </div>
         </div>
@@ -1182,9 +1261,9 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
 
             {/* generation birth-era bands at the bottom */}
             {[
-              { label:"Great-grandparents born", y1:1895, y2:1912, color:"#D98032" },
-              { label:"Grandparents born",       y1:1928, y2:1938, color:"#7B4FB0" },
-              { label:"Parents born",            y1:1957, y2:1967, color:"#1D9E75" },
+              { label:"Urgroßeltern geboren", y1:1895, y2:1912, color:"#D98032" },
+              { label:"Großeltern geboren",       y1:1928, y2:1938, color:"#7B4FB0" },
+              { label:"Eltern geboren",            y1:1957, y2:1967, color:"#1D9E75" },
             ].filter(b => hx(b.y2) > 42 && hx(b.y1) < SVG_W-38).map(b => {
               const bx = hx(b.y1), bw = Math.max(hx(b.y2)-hx(b.y1), 2);
               return (
@@ -1195,9 +1274,9 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
             })}
             {/* gen band labels — only if wide enough */}
             {[
-              { label:"Great-gp.", y1:1895, y2:1912, color:"#D98032" },
-              { label:"Gp.",       y1:1928, y2:1938, color:"#7B4FB0" },
-              { label:"Parents",  y1:1957, y2:1967, color:"#1D9E75" },
+              { label:"Urgr.", y1:1895, y2:1912, color:"#D98032" },
+              { label:"Gr.elt.",       y1:1928, y2:1938, color:"#7B4FB0" },
+              { label:"Eltern",  y1:1957, y2:1967, color:"#1D9E75" },
             ].filter(b => { const bw = hx(b.y2)-hx(b.y1); return bw > 30 && hx(b.y2) > 42 && hx(b.y1) < SVG_W-38; }).map(b => (
               <text key={b.label+"lbl"} x={(hx(b.y1)+hx(b.y2))/2} y={156}
                 style={{ fontSize:6.5, fill:b.color, textAnchor:"middle", fontWeight:700 }}>{b.label}</text>
@@ -1240,7 +1319,7 @@ function FamilyPage({ familyData, setFamilyData, onReset, familyEvents = [], set
           </svg>
         </div>
         ) : (
-          <p style={{ fontSize:13, color:"#a39f95", textAlign:"center", padding:"20px 0" }}>Enable a category above to see events.</p>
+          <p style={{ fontSize:13, color:"#a39f95", textAlign:"center", padding:"20px 0" }}>Kategorie aktivieren um Ereignisse anzuzeigen.</p>
         )}
 
         {/* scrollable event index */}
@@ -1320,9 +1399,9 @@ function PersonModal({ person, people, onSave, onDelete, onClose, onAddConnectio
   const [parentId1, setParentId1] = useState(person.parentId1 ?? "");
   const [parentId2, setParentId2] = useState(person.parentId2 ?? "");
   const GEN_LABELS = {
-    0:"Gen 0 — Great-great-grandparents", 1:"Gen 1 — Great-grandparents",
-    2:"Gen 2 — Grandparents & siblings",  3:"Gen 3 — Parents, aunts & uncles",
-    4:"Gen 4 — Your generation",          5:"Gen 5 — Children & nephews",
+    0:"Gen 0 — Ururgroßeltern", 1:"Gen 1 — Urgroßeltern",
+    2:"Gen 2 — Großeltern & Geschwister",  3:"Gen 3 — Eltern, Tanten & Onkel",
+    4:"Gen 4 — Deine Generation",          5:"Gen 5 — Kinder & Neffen",
   };
   const parentOptions = people
     ? people.filter(p => p.id !== person.id && p.gen < gen && p.name).sort((a,b) => b.gen - a.gen)
@@ -1335,49 +1414,49 @@ function PersonModal({ person, people, onSave, onDelete, onClose, onAddConnectio
         <label style={S.field}><span style={S.fieldLabel}>Name</span>
           <input style={S.input} value={name} onChange={e => setName(e.target.value)} autoFocus /></label>
         <div style={S.row}>
-          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Born</span>
+          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Geboren</span>
             <input style={S.input} type="number" min={1800} max={2024} value={birthYear} placeholder="e.g. 1932"
               onChange={e => setBirthYear(e.target.value ? parseInt(e.target.value) : "")} /></label>
-          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Died (if applicable)</span>
+          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Gestorben (falls zutreffend)</span>
             <input style={S.input} type="number" min={1800} max={2026} value={deathYear} placeholder="optional"
               onChange={e => setDeathYear(e.target.value ? parseInt(e.target.value) : "")} /></label>
         </div>
-        <label style={S.field}><span style={S.fieldLabel}>Role / description</span>
-          <input style={S.input} value={role} onChange={e => setRole(e.target.value)} placeholder="e.g. Farmer, Terlan" /></label>
-        <label style={S.field}><span style={S.fieldLabel}>Generation row (move if placed incorrectly)</span>
+        <label style={S.field}><span style={S.fieldLabel}>Rolle / Beschreibung</span>
+          <input style={S.input} value={role} onChange={e => setRole(e.target.value)} placeholder="z.B. Bauer, Terlan" /></label>
+        <label style={S.field}><span style={S.fieldLabel}>Generationsreihe (verschieben falls falsch)</span>
           <select style={S.input} value={gen} onChange={e => setGen(parseInt(e.target.value))}>
             {Object.entries(GEN_LABELS).map(([g, label]) => <option key={g} value={g}>{label}</option>)}
           </select></label>
         {parentOptions.length > 0 && (
           <div style={S.row}>
-            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Parent 1</span>
+            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Elternteil 1</span>
               <select style={S.input} value={parentId1||""} onChange={e => setParentId1(e.target.value||null)}>
                 <option value="">— none —</option>
                 {parentOptions.map(p => <option key={p.id} value={p.id}>{p.name} ({p.role})</option>)}
               </select></label>
-            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Parent 2</span>
+            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Elternteil 2</span>
               <select style={S.input} value={parentId2||""} onChange={e => setParentId2(e.target.value||null)}>
                 <option value="">— none —</option>
                 {parentOptions.map(p => <option key={p.id} value={p.id}>{p.name} ({p.role})</option>)}
               </select></label>
           </div>
         )}
-        <label style={S.field}><span style={S.fieldLabel}>Notes — occupation, hometown, anything known</span>
+        <label style={S.field}><span style={S.fieldLabel}>Notizen — Beruf, Heimatort, Bekanntes</span>
           <textarea style={{ ...S.input, minHeight:70, resize:"vertical" }} value={notes}
             onChange={e => setNotes(e.target.value)} /></label>
         <div style={S.modalActions}>
-          {onDelete && <button style={S.deleteBtn} onClick={() => { if (window.confirm("Remove this person?")) onDelete(person.id); }}>Remove</button>}
+          {onDelete && <button style={S.deleteBtn} onClick={() => { if (window.confirm("Diese Person entfernen?")) onDelete(person.id); }}>Entfernen</button>}
           <div style={{ flex:1 }} />
-          <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
-          <button style={S.saveBtn} onClick={() => onSave({ ...person, name:name.trim(), birthYear:birthYear||null, deathYear:deathYear||null, notes:notes.trim(), role:role.trim()||person.role, gen, parentId1:parentId1||null, parentId2:parentId2||null })}>Save</button>
+          <button style={S.cancelBtn} onClick={onClose}>Abbrechen</button>
+          <button style={S.saveBtn} onClick={() => onSave({ ...person, name:name.trim(), birthYear:birthYear||null, deathYear:deathYear||null, notes:notes.trim(), role:role.trim()||person.role, gen, parentId1:parentId1||null, parentId2:parentId2||null })}>Speichern</button>
         </div>
         <div style={{ borderTop:"1.5px solid #ece8df", marginTop:20, paddingTop:16 }}>
           <div style={{ fontSize:11, fontWeight:700, color:"#a39f95", textTransform:"uppercase", letterSpacing:"0.07em", marginBottom:10 }}>
-            Add a connection to {name||person.role}
+            Verbindung hinzufügen zu {name||person.role}
           </div>
           <div style={{ display:"flex", flexWrap:"wrap", gap:7 }}>
-            {[["child","＋ Child"],["parent","＋ Parent"],["sibling","＋ Sibling"],["partner","＋ Partner"],
-              ["grandparent","＋ Grandparent"],["auntuncle","＋ Aunt / Uncle"],["cousin","＋ Cousin"],["greatgrandparent","＋ Great-grandparent"]
+            {[["child","＋ Kind"],["parent","＋ Elternteil"],["sibling","＋ Geschwister"],["partner","＋ Partner/in"],
+              ["grandparent","＋ Großelternteil"],["auntuncle","＋ Tante / Onkel"],["cousin","＋ Cousin/e"],["greatgrandparent","＋ Urgroßelternteil"]
             ].map(([type, label]) => (
               <button key={type} onClick={() => onAddConnection(type)} style={S.connectBtn}>{label}</button>
             ))}
@@ -1402,22 +1481,22 @@ function AddPersonModal({ people, prefilledRelType, prefilledRef, onAdd, onClose
   const genMap = { parent:-1, sibling:0, partner:0, grandparent:-2, greatgrandparent:-3, greatgreatgrandparent:-4, auntuncle:-1, cousin:0, child:1 };
   const genOffset = genMap[relType] ?? 0;
   const computedGen = ref ? ref.gen + genOffset : 4;
-  const genLabel = { 0:"Great-great-grandparents", 1:"Great-grandparents", 2:"Grandparents", 3:"Parents", 4:"You / siblings", 5:"Children / nephews" };
-  const relLabel = { parent:"parent", sibling:"sibling", partner:"partner", grandparent:"grandparent", greatgrandparent:"great-grandparent", greatgreatgrandparent:"great-great-grandparent", auntuncle:"aunt/uncle", cousin:"cousin", child:"child" };
-  const roleDefault = { parent:"Parent", sibling:"Sibling", partner:"Partner", grandparent:"Grandparent", greatgrandparent:"Great-grandparent", greatgreatgrandparent:"Great-great-grandparent", auntuncle:"Aunt / Uncle", cousin:"Cousin", child:"Child" };
+  const genLabel = { 0:"Ururgroßeltern", 1:"Urgroßeltern", 2:"Großeltern", 3:"Eltern", 4:"Du / Geschwister", 5:"Kinder / Neffen" };
+  const relLabel = { parent:"Elternteil", sibling:"Geschwister", partner:"Partner/in", grandparent:"Großelternteil", greatgrandparent:"Urgroßelternteil", greatgreatgrandparent:"Ururgroßelternteil", auntuncle:"Tante/Onkel", cousin:"Cousin/e", child:"Kind" };
+  const roleDefault = { parent:"Elternteil", sibling:"Geschwister", partner:"Partner/in", grandparent:"Großelternteil", greatgrandparent:"Urgroßelternteil", greatgreatgrandparent:"Ururgroßelternteil", auntuncle:"Tante / Onkel", cousin:"Cousin/e", child:"Kind" };
   return (
     <div style={S.overlay} onClick={onClose}>
       <div style={{ ...S.modal, maxWidth:480 }} onClick={e => e.stopPropagation()}>
         <h3 style={S.modalTitle}>
-          {isPrefilled ? `Add ${relLabel[relType]} of ${prefilledRef.name || prefilledRef.role}` : "Add a family member"}
+          {isPrefilled ? `Add ${relLabel[relType]} of ${prefilledRef.name || prefilledRef.role}` : "Familienmitglied hinzufügen"}
         </h3>
         {!isPrefilled && (
           <div style={S.row}>
-            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Relationship</span>
+            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Beziehung</span>
               <select style={S.input} value={relType} onChange={e => setRelType(e.target.value)}>
                 {Object.entries(relLabel).map(([k,v]) => <option key={k} value={k}>{v.charAt(0).toUpperCase()+v.slice(1)} of…</option>)}
               </select></label>
-            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>…this person</span>
+            <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>…diese Person</span>
               <select style={S.input} value={refId} onChange={e => setRefId(e.target.value)}>
                 {people.map(p => <option key={p.id} value={p.id}>{p.name || `[${p.role}]`}</option>)}
               </select></label>
@@ -1431,21 +1510,21 @@ function AddPersonModal({ people, prefilledRelType, prefilledRef, onAdd, onClose
         )}
         <label style={S.field}><span style={S.fieldLabel}>Name</span>
           <input style={S.input} value={name} onChange={e => setName(e.target.value)}
-            placeholder="First and/or family name" autoFocus /></label>
+            placeholder="Vor- und/oder Nachname" autoFocus /></label>
         <div style={S.row}>
-          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Born</span>
+          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Geboren</span>
             <input style={S.input} type="number" min={1800} max={2030} value={birthYear} placeholder="optional"
               onChange={e => setBirthYear(e.target.value ? parseInt(e.target.value) : "")} /></label>
-          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Died</span>
+          <label style={{ ...S.field, flex:1 }}><span style={S.fieldLabel}>Gestorben</span>
             <input style={S.input} type="number" min={1800} max={2030} value={deathYear} placeholder="optional"
               onChange={e => setDeathYear(e.target.value ? parseInt(e.target.value) : "")} /></label>
         </div>
-        <label style={S.field}><span style={S.fieldLabel}>Notes (optional)</span>
+        <label style={S.field}><span style={S.fieldLabel}>Notizen (optional)</span>
           <textarea style={{ ...S.input, minHeight:50, resize:"vertical" }} value={notes}
             onChange={e => setNotes(e.target.value)} /></label>
         <div style={S.modalActions}>
           <div style={{ flex:1 }} />
-          <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
+          <button style={S.cancelBtn} onClick={onClose}>Abbrechen</button>
           <button style={S.saveBtn}
             onClick={() => { onAdd({ name:name.trim(), birthYear:birthYear||null, deathYear:deathYear||null, notes:notes.trim(), role:roleDefault[relType] }, relType, refId); onClose(); }}>
             Add person
@@ -1483,21 +1562,21 @@ function EventModal({ event, tracks, minYear, maxYear, birthYear, onSave, onDele
   return (
     <div style={S.overlay} onClick={onClose}>
       <div style={S.modal} onClick={e => e.stopPropagation()}>
-        <h3 style={S.modalTitle}>{event ? "Edit moment" : "Add a moment"}</h3>
-        <label style={S.field}><span style={S.fieldLabel}>Title</span>
+        <h3 style={S.modalTitle}>{event ? "Moment bearbeiten" : "Moment hinzufügen"}</h3>
+        <label style={S.field}><span style={S.fieldLabel}>Titel</span>
           <input style={S.input} value={title} onChange={e => setTitle(e.target.value)}
             placeholder="e.g. Born in Innichen" autoFocus /></label>
         <label style={S.field}>
-          <span style={S.fieldLabel}>Start date{preview(sp) ? <span style={{ color:"#1D9E75", fontWeight:600 }}> — {preview(sp)}</span> : null}</span>
+          <span style={S.fieldLabel}>Startdatum{preview(sp) ? <span style={{ color:"#1D9E75", fontWeight:600 }}> — {preview(sp)}</span> : null}</span>
           <input style={{ ...S.input, borderColor: fieldBorder(startStr, startOk) }}
             value={startStr} onChange={e => setStartStr(e.target.value)}
             placeholder="YYYY  ·  MM/YYYY  ·  DD/MM/YYYY" />
-          {startStr && !startOk && <div style={S.dateError}>Try: 1990 · 05/1990 · 25/05/1990</div>}
+          {startStr && !startOk && <div style={S.dateError}>Format: 1990 · 05/1990 · 25/05/1990</div>}
         </label>
         <label style={S.field}>
-          <span style={S.fieldLabel}>End date{preview(ep)
+          <span style={S.fieldLabel}>Enddatum{preview(ep)
             ? <span style={{ color:"#1D9E75", fontWeight:600 }}> — {preview(ep)}</span>
-            : <span style={{ color:"#b0ab9f" }}> (optional — leave blank for a point event)</span>}
+            : <span style={{ color:"#b0ab9f" }}> (optional — leer lassen für Einzelereignis)</span>}
           </span>
           <input style={{ ...S.input, borderColor: fieldBorder(endStr, endOk) }}
             value={endStr} onChange={e => setEndStr(e.target.value)}
@@ -1506,27 +1585,27 @@ function EventModal({ event, tracks, minYear, maxYear, birthYear, onSave, onDele
         </label>
         {isRange && (
           <div style={S.durationPill}>
-            <span style={{ color:"#1D9E75", fontWeight:700 }}>{durYrs} yrs</span>
-            <span style={{ color:"#a39f95" }}> · ages {startAge}–{endAge} · shows as bar</span>
+            <span style={{ color:"#1D9E75", fontWeight:700 }}>{durYrs} J.</span>
+            <span style={{ color:"#a39f95" }}> · Alter {startAge}–{endAge} · als Balken dargestellt</span>
           </div>
         )}
-        <label style={S.field}><span style={S.fieldLabel}>Track</span>
+        <label style={S.field}><span style={S.fieldLabel}>Kategorie</span>
           <select style={S.input} value={track} onChange={e => setTrack(e.target.value)}>
             {tracks.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
           </select></label>
-        <label style={S.field}><span style={S.fieldLabel}>Note (optional)</span>
+        <label style={S.field}><span style={S.fieldLabel}>Notiz (optional)</span>
           <textarea style={{ ...S.input, minHeight:60, resize:"vertical" }} value={note}
-            onChange={e => setNote(e.target.value)} placeholder="What this meant, how it felt…" /></label>
+            onChange={e => setNote(e.target.value)} placeholder="Was es bedeutete, wie es sich anfühlte…" /></label>
         <div style={S.modalActions}>
-          {onDelete && <button style={S.deleteBtn} onClick={() => onDelete(event.id)}>Delete</button>}
+          {onDelete && <button style={S.deleteBtn} onClick={() => onDelete(event.id)}>Löschen</button>}
           <div style={{ flex:1 }} />
-          <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
+          <button style={S.cancelBtn} onClick={onClose}>Abbrechen</button>
           <button style={S.saveBtn} disabled={!canSave}
             onClick={() => onSave({
               ...(event||{}), year:sp.year, month:sp.month||null, day:sp.day||null,
               endYear:isRange?ep.year:null, endMonth:isRange?ep.month||null:null, endDay:isRange?ep.day||null:null,
               track, title:title.trim(), note:note.trim(),
-            })}>Save</button>
+            })}>Speichern</button>
         </div>
       </div>
     </div>
@@ -1544,26 +1623,26 @@ function AddFamilyEventModal({ event, onSave, onDelete, onClose }) {
   return (
     <div style={S.overlay} onClick={onClose}>
       <div style={S.modal} onClick={e => e.stopPropagation()}>
-        <h3 style={S.modalTitle}>{event ? "Edit family event" : "Add family event"}</h3>
+        <h3 style={S.modalTitle}>{event ? "Familienereignis bearbeiten" : "Familienereignis hinzufügen"}</h3>
         <div style={S.row}>
           <label style={{ ...S.field, flex:"0 0 100px" }}>
-            <span style={S.fieldLabel}>Year</span>
+            <span style={S.fieldLabel}>Jahr</span>
             <input style={S.input} type="number" min={1800} max={2030} value={year}
               onChange={e => setYear(parseInt(e.target.value)||1990)} />
           </label>
           <label style={{ ...S.field, flex:1 }}>
-            <span style={S.fieldLabel}>Title</span>
+            <span style={S.fieldLabel}>Titel</span>
             <input style={S.input} value={title} onChange={e => setTitle(e.target.value)}
-              placeholder="e.g. Ernst builds the Terlan house" autoFocus />
+              placeholder="z.B. Ernst baut das Terlanerhaus" autoFocus />
           </label>
         </div>
         <label style={S.field}>
-          <span style={S.fieldLabel}>Description (optional)</span>
+          <span style={S.fieldLabel}>Beschreibung (optional)</span>
           <textarea style={{ ...S.input, minHeight:60, resize:"vertical" }} value={desc}
-            onChange={e => setDesc(e.target.value)} placeholder="What happened, why it matters…" />
+            onChange={e => setDesc(e.target.value)} placeholder="Was passierte, warum es wichtig ist…" />
         </label>
         <label style={S.field}>
-          <span style={S.fieldLabel}>Colour</span>
+          <span style={S.fieldLabel}>Farbe</span>
           <div style={{ display:"flex", gap:8, marginTop:4 }}>
             {COLORS.map(c => (
               <div key={c} onClick={() => setColor(c)} style={{
@@ -1574,13 +1653,43 @@ function AddFamilyEventModal({ event, onSave, onDelete, onClose }) {
           </div>
         </label>
         <div style={S.modalActions}>
-          {onDelete && <button style={S.deleteBtn} onClick={onDelete}>Delete</button>}
+          {onDelete && <button style={S.deleteBtn} onClick={onDelete}>Löschen</button>}
           <div style={{ flex:1 }} />
-          <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
+          <button style={S.cancelBtn} onClick={onClose}>Abbrechen</button>
           <button style={S.saveBtn} disabled={!title.trim()}
             onClick={() => onSave({ ...(event||{}), year, title:title.trim(), desc:desc.trim(), color, loc:"family" })}>
             Save
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Family password modal ─────────────────────────────────────────────────────
+function FamilyPasswordModal({ onSuccess, onClose }) {
+  const [pw,  setPw]  = useState("");
+  const [err, setErr] = useState(false);
+  useEscapeKey(onClose);
+  const attempt = () => {
+    if (pw === FAMILY_PW) { onSuccess(); }
+    else { setErr(true); setPw(""); setTimeout(() => setErr(false), 1400); }
+  };
+  return (
+    <div style={S.overlay} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth:340, textAlign:"center" }} onClick={e => e.stopPropagation()}>
+        <div style={{ fontSize:32, marginBottom:12 }}>🌳</div>
+        <h3 style={{ ...S.modalTitle, textAlign:"center", marginBottom:8 }}>Familienzugang</h3>
+        <p style={{ fontSize:13, color:"#a39f95", marginBottom:20 }}>Familienpasswort eingeben um zu bearbeiten.</p>
+        <input style={{ ...S.input, textAlign:"center", letterSpacing:"0.15em", fontSize:16,
+          borderColor: err ? "#E15554" : undefined, transition:"border-color .2s" }}
+          type="password" value={pw} autoFocus placeholder="••••••••••••"
+          onChange={e => setPw(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && attempt()} />
+        {err && <p style={{ fontSize:12, color:"#E15554", marginTop:8 }}>Falsches Passwort</p>}
+        <div style={{ ...S.modalActions, justifyContent:"center", borderTop:"none", marginTop:20 }}>
+          <button style={S.cancelBtn} onClick={onClose}>Abbrechen</button>
+          <button style={S.saveBtn} onClick={attempt}>Bearbeitung entsperren</button>
         </div>
       </div>
     </div>
@@ -1603,7 +1712,7 @@ function GistSetupModal({ currentToken, currentGistId, currentData, onSave, onDi
       let isNew = false;
       if (!id) {
         // Create a new Gist with current data
-        setMsg("Creating Gist…");
+        setMsg("Gist wird erstellt…");
         id = await gistCreate(token.trim(), {
           tl: currentData.tl, fam: currentData.fam, famEv: currentData.famEv,
           savedAt: new Date().toISOString(),
@@ -1611,35 +1720,35 @@ function GistSetupModal({ currentToken, currentGistId, currentData, onSave, onDi
         isNew = true;
       } else {
         // Verify existing Gist is accessible
-        setMsg("Verifying…");
+        setMsg("Wird geprüft…");
         await gistLoad(token.trim(), id);
       }
       setStatus("ok");
-      setMsg(isNew ? `✓ Gist created (ID: ${id})` : "✓ Connected");
+      setMsg(isNew ? `✓ Gist erstellt (ID: ${id})` : "✓ Verbunden");
       setTimeout(() => onSave(token.trim(), id, isNew), 800);
     } catch (e) {
       setStatus("error");
-      setMsg(`Error: ${e.message === "401" ? "Invalid token — check it has 'gist' scope." : e.message === "404" ? "Gist not found — check the ID." : "Connection failed. Try again."}`);
+      setMsg(`Error: ${e.message === "401" ? "Ungültiger Token — muss 'gist'-Bereich haben." : e.message === "404" ? "Gist nicht gefunden — ID überprüfen." : "Verbindung fehlgeschlagen. Nochmal versuchen."}`);
     }
   };
 
   return (
     <div style={S.overlay} onClick={onClose}>
       <div style={{ ...S.modal, maxWidth:500 }} onClick={e => e.stopPropagation()}>
-        <h3 style={S.modalTitle}>☁ Sync to GitHub</h3>
+        <h3 style={S.modalTitle}>☁ Mit GitHub synchronisieren</h3>
         <p style={{ fontSize:13, color:"#6b6a64", marginBottom:20, lineHeight:1.6 }}>
-          Your data is saved to a private GitHub Gist — accessible from any browser or device, automatically, in the background.
+          Your data is saved to a private GitHub Gist — automatisch, im Hintergrund, von jedem Browser abrufbar.
         </p>
 
         <div style={{ background:"#f8f7f3", border:"1px solid #ece8df", borderRadius:8, padding:"12px 16px", marginBottom:16 }}>
-          <div style={{ fontWeight:700, fontSize:13, marginBottom:8 }}>Step 1 — Create a token</div>
+          <div style={{ fontWeight:700, fontSize:13, marginBottom:8 }}>Schritt 1 — Token erstellen</div>
           <p style={{ fontSize:12, color:"#6b6a64", margin:0, lineHeight:1.6 }}>
-            Go to <a href="https://github.com/settings/tokens/new?description=Timeline+sync&scopes=gist" target="_blank" rel="noreferrer" style={{ color:"#3D9BE0" }}>github.com/settings/tokens/new</a>, name it <em>Timeline sync</em>, check only <strong>gist</strong>, set expiration to <strong>No expiration</strong>, click Generate, copy the token.
+            Go to <a href="https://github.com/settings/tokens/new?description=Timeline+sync&scopes=gist" target="_blank" rel="noreferrer" style={{ color:"#3D9BE0" }}>github.com/settings/tokens/new</a>, als <em>Timeline sync</em> benennen, nur <strong>gist</strong> ankreuzen, Ablaufdatum auf <strong>No expiration</strong> setzen, Generate klicken, Token kopieren.
           </p>
         </div>
 
         <label style={S.field}>
-          <span style={S.fieldLabel}>Personal Access Token</span>
+          <span style={S.fieldLabel}>Persönlicher Zugriffstoken</span>
           <input style={S.input} type="password" value={token}
             onChange={e => setToken(e.target.value)} placeholder="ghp_xxxxxxxxxxxx" autoFocus />
         </label>
@@ -1647,21 +1756,21 @@ function GistSetupModal({ currentToken, currentGistId, currentData, onSave, onDi
         <label style={S.field}>
           <span style={S.fieldLabel}>Gist ID — leave blank to create one automatically</span>
           <input style={S.input} value={gistId}
-            onChange={e => setGistId(e.target.value)} placeholder="leave blank for first-time setup" />
+            onChange={e => setGistId(e.target.value)} placeholder="leer lassen bei Ersteinrichtung" />
         </label>
 
         {msg && <p style={{ fontSize:12, color: status==="error"?"#E15554":"#1D9E75", margin:"0 0 14px" }}>{msg}</p>}
 
         <div style={S.modalActions}>
           {currentGistId && (
-            <button style={S.deleteBtn} onClick={() => { if (window.confirm("Disconnect sync? Your local data stays safe.")) onDisconnect(); }}>
+            <button style={S.deleteBtn} onClick={() => { if (window.confirm("Synchronisierung trennen? Lokale Daten bleiben erhalten.")) onDisconnect(); }}>
               Disconnect
             </button>
           )}
           <div style={{ flex:1 }} />
-          <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
+          <button style={S.cancelBtn} onClick={onClose}>Abbrechen</button>
           <button style={S.saveBtn} onClick={connect} disabled={status === "working"}>
-            {status === "working" ? "Connecting…" : currentGistId ? "Update" : "Connect & sync"}
+            {status === "working" ? "Verbinde…" : currentGistId ? "Aktualisieren" : "Verbinden & synchronisieren"}
           </button>
         </div>
       </div>
@@ -1682,8 +1791,8 @@ function PasswordModal({ onSuccess, onClose }) {
     <div style={S.overlay} onClick={onClose}>
       <div style={{ ...S.modal, maxWidth:340, textAlign:"center" }} onClick={e => e.stopPropagation()}>
         <div style={{ fontSize:32, marginBottom:12 }}>🔒</div>
-        <h3 style={{ ...S.modalTitle, marginBottom:8, textAlign:"center" }}>Personal timeline</h3>
-        <p style={{ fontSize:13, color:"#a39f95", marginBottom:20 }}>Enter the password to access your personal timeline.</p>
+        <h3 style={{ ...S.modalTitle, marginBottom:8, textAlign:"center" }}>Persönliche Zeitleiste</h3>
+        <p style={{ fontSize:13, color:"#a39f95", marginBottom:20 }}>Passwort für die persönliche Zeitleiste eingeben.</p>
         <input
           style={{ ...S.input, textAlign:"center", letterSpacing:"0.2em", fontSize:18,
             borderColor: err ? "#E15554" : undefined,
@@ -1693,10 +1802,10 @@ function PasswordModal({ onSuccess, onClose }) {
           onChange={e => setPw(e.target.value.toUpperCase())}
           onKeyDown={e => e.key === "Enter" && attempt()}
         />
-        {err && <p style={{ fontSize:12, color:"#E15554", marginTop:8 }}>Incorrect password</p>}
+        {err && <p style={{ fontSize:12, color:"#E15554", marginTop:8 }}>Falsches Passwort</p>}
         <div style={{ ...S.modalActions, justifyContent:"center", borderTop:"none", marginTop:20 }}>
-          <button style={S.cancelBtn} onClick={onClose}>Cancel</button>
-          <button style={S.saveBtn} onClick={attempt}>Unlock</button>
+          <button style={S.cancelBtn} onClick={onClose}>Abbrechen</button>
+          <button style={S.saveBtn} onClick={attempt}>Entsperren</button>
         </div>
       </div>
     </div>
